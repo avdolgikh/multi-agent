@@ -81,7 +81,7 @@ Pipeline tool: `D:\dev\avdolgikh_github_repos\spec-driven-dev-pipeline`
 
 | # | Task ID | Spec | Status |
 |---|---------|------|--------|
-| 1 | `core-infrastructure` | Shared infrastructure (agents, messaging, tracing, state, resilience) | IN PROGRESS |
+| 1 | `core-infrastructure` | Shared infrastructure (agents, messaging, tracing, state, resilience) | DONE |
 | 2 | `orchestration-code-analysis` | Orchestrated code analysis pipeline | PENDING |
 | 3 | `choreography-research` | Event-driven multi-source research | PENDING |
 | 4 | `hybrid-analysis` | Hybrid pattern + comparison harness | PENDING |
@@ -128,21 +128,25 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 - **Fix**: Added `## Source Files` with `.py` filenames in backticks to all 4 specs.
 - **Cleanup**: Deleted `.pipeline-state/`, test files, `.venv`, started fresh.
 
-### Run 2: core-infrastructure (IN PROGRESS)
+### Run 2: core-infrastructure (COMPLETE)
 - **Provider**: codex
-- **Stage 1 (Test Generation)**: PASSED — created `tests/test_core_infrastructure.py` (312 lines)
-  - Model: gpt-5.1-codex-mini
-  - Tests cover: agents, messaging, tracing, state, resilience, DLQ
-- **Stage 2 (Test Review iter 0)**: REVISE
-  - Model: gpt-5.2-codex (reviewer)
-  - Blocking issues found:
-    1. Tests mock legacy OpenAI APIs (`ChatCompletion.acreate`). Need modern `AsyncOpenAI` with `base_url`.
-    2. Missing tests for Tool protocol (`WebSearchTool`, `FileReadTool`, `FileWriteTool`).
-- **Stage 2b (Test Revision iter 0)**: IN PROGRESS — test-writer revising to address reviewer feedback
-- **Next**: After revision → re-review → freeze tests → Stage 3 (Implementation)
+- **Stage 1 (Test Generation)**: PASSED — `tests/test_core_infrastructure.py`
+- **Stage 2 (Test Review)**: 5 review/revise iterations total
+  - iter 0-3: Codex revised (mock shape, tool coverage, traced decorator, circuit breaker, trace propagation)
+  - iter 4: Reviewer flagged over-constrained trace propagation test. Hit revision cap (exit 2).
+  - **Manual fix**: Replaced message-payload trace assertion with span-based check. Reset iteration.
+  - iter 0 (post-fix): APPROVED. Tests frozen.
+- **Stage 3 (Implementation)**: PASSED — 1,034 lines across 6 modules
+  - **Manual fix**: SyntaxError in test file (escaped quotes `f\"...\"` from codegen). Fixed + updated frozen hash.
+- **Stage 4 (Validation)**: PASSED — 19/19 tests green
+- **Stage 5 (Code Review)**: 3 review/revise iterations
+  - iter 0: Revise (traced decorator, DLQ API)
+  - iter 1: Revise (InMemoryBus must be queue-backed per spec)
+  - iter 2: APPROVED
+- **Verification**: PASSED — 19/19 tests, exit 0
 
 ### Pending Specs
-- `orchestration-code-analysis` — waiting for core-infrastructure to complete
+- `orchestration-code-analysis` — ready to start (core-infrastructure complete)
 - `choreography-research` — waiting for orchestration to complete  
 - `hybrid-analysis` — waiting for choreography to complete
 
@@ -150,7 +154,7 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 ```bash
 # Pipeline state is saved to .pipeline-state/. Just re-run:
 cd D:/dev/avdolgikh_github_repos/spec-driven-dev-pipeline
-uv run python scripts/run_pipeline.py core-infrastructure --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent
+uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent
 
 # To start spec fresh, delete state first:
 rm -rf D:/dev/avdolgikh_github_repos/multi-agent/.pipeline-state

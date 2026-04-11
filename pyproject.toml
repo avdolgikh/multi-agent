@@ -25,13 +25,26 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/core", "src/orchestration", "src/choreography", "src/hybrid", "src/comparison"]
+packages = [
+    "src/core",
+    "src/orchestration",
+    "src/choreography",
+    "src/hybrid",
+    "src/comparison",
+    "src/opentelemetry",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 timeout = 30
+pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+]
