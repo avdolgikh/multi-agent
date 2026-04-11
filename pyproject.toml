@@ -1,0 +1,37 @@
+[project]
+name = "multi-agent-distributed-system"
+version = "0.1.0"
+description = "Orchestration vs choreography in multi-agent AI systems — working demonstrations"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp>=1.25",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core", "src/orchestration", "src/choreography", "src/hybrid", "src/comparison"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+timeout = 30
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
