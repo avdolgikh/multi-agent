@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -81,7 +81,7 @@ class SnapshotStore:
             workflow_id=workflow_id,
             step=step,
             state=dict(state),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         async with self._lock:
             self._snapshots[snapshot_id] = snapshot

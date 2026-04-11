@@ -131,7 +131,7 @@ class BaseAgent(ABC):
         client = self._create_client()
         response = await client.chat.completions.create(
             model=self.model,
-            messages=chat_messages,
+            messages=chat_messages,  # type: ignore[arg-type]
         )
         return response
 

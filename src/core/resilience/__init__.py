@@ -4,7 +4,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -173,7 +173,7 @@ class DeadLetterQueue:
             original_message=message,
             error=error,
             source=source,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         async with self._lock:
             self._store[dead_letter.id] = DeadLetterRecord(dead_letter=dead_letter)

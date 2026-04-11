@@ -31,7 +31,6 @@ packages = [
     "src/choreography",
     "src/hybrid",
     "src/comparison",
-    "src/opentelemetry",
 ]
 
 [tool.pytest.ini_options]
@@ -46,5 +45,9 @@ line-length = 100
 
 [dependency-groups]
 dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
+    "pyright>=1.1",
     "ruff>=0.15.10",
 ]

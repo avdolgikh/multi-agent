@@ -1,7 +1,7 @@
 import asyncio
 import inspect
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 from types import SimpleNamespace
 from uuid import uuid4
@@ -34,7 +34,7 @@ def make_message(topic: str, payload: dict, *, trace_context: dict | None = None
         message_id=str(uuid4()),
         topic=topic,
         payload=payload,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         trace_context=trace_context or {},
         source_agent="test-agent",
     )
@@ -559,7 +559,7 @@ async def test_event_store_append_and_replay():
             stream=stream,
             event_type="update",
             data={"value": value, f"flag_{value}": True},
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             sequence=value,
             trace_context={},
         )
