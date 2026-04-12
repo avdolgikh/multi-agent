@@ -44,7 +44,7 @@ src/
 - Each module has `__init__.py` re-exporting its public API
 - Use `asyncio` throughout — agents are async
 - Use `pydantic` for message schemas and configuration
-- Tests use mock LLM responses (no real API calls in tests)
+- **UNIT TESTS ONLY — mock ALL external calls.** Tests verify logic/functionality, never real integrations. This includes LLM APIs (OpenAI/Ollama), HTTP (OTLP/Phoenix/Traceloop span export), Redis, databases, and any subprocess to external services. `tests/conftest.py` provides autouse fixtures that stub Traceloop + OTLP HTTP exporters; any new test must preserve these stubs or add its own. No test may make a network call.
 - No external services needed (no Redis, no cloud APIs in tests)
 - Each use case is runnable via `uv run python -m <module>`
 

@@ -36,6 +36,7 @@ def _load_observability_module():
 
 def _provide_fake_traceloop(monkeypatch, init_calls: list[dict[str, bool]]):
     """Insert a fake traceloop.sdk module that records init() invocations."""
+
     class FakeTraceloop:
         @staticmethod
         def init(*, app_name: str, disable_batch: bool) -> None:
@@ -133,12 +134,8 @@ def test_init_observability_sets_up_tracing_and_traceloop(monkeypatch):
         "orchestration-code-analysis", phoenix_endpoint="http://localhost:6006/v1/traces"
     )
 
-    assert setup_calls == [
-        ("orchestration-code-analysis", "http://localhost:6006/v1/traces")
-    ]
-    assert traceloop_calls == [
-        {"app_name": "orchestration-code-analysis", "disable_batch": True}
-    ]
+    assert setup_calls == [("orchestration-code-analysis", "http://localhost:6006/v1/traces")]
+    assert traceloop_calls == [{"app_name": "orchestration-code-analysis", "disable_batch": True}]
 
 
 def test_init_observability_respects_otel_endpoint_env(monkeypatch):
@@ -154,7 +151,9 @@ def test_init_observability_respects_otel_endpoint_env(monkeypatch):
     _provide_fake_traceloop(monkeypatch, [])
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://custom:4318/v1/traces")
 
-    module.init_observability("choreography-research", phoenix_endpoint="http://localhost:6006/v1/traces")
+    module.init_observability(
+        "choreography-research", phoenix_endpoint="http://localhost:6006/v1/traces"
+    )
 
     assert endpoints[-1] == "https://custom:4318/v1/traces"
 
@@ -209,14 +208,14 @@ def test_orchestration_code_analysis_smoke_exports_spans(monkeypatch, tmp_path):
     _provide_fake_async_openai(monkeypatch)
 
     sample_file = tmp_path / "demo.py"
-    sample_file.write_text("print('observability demo')")
+    sample_file.write_text("def demo():\n    return 'observability demo'\n")
     monkeypatch.setattr(sys, "argv", ["python", str(sample_file)])
 
     try:
-        runpy.run_module("src.orchestration.code_analysis", run_name="__main__")
+        runpy.run_module("orchestration.code_analysis", run_name="__main__")
     except ModuleNotFoundError:
         pytest.fail(
-            "src.orchestration.code_analysis is not implemented yet; Observability Phase 1 "
+            "orchestration.code_analysis is not implemented yet; Observability Phase 1 "
             "requires the orchestrated demo entry point."
         )
     except SystemExit as exc:
