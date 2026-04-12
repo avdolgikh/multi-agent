@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from importlib import import_module
+import sys
+from unittest.mock import MagicMock
 
 
 def _ensure_inmemory_exporter() -> None:
@@ -25,3 +27,16 @@ def _ensure_inmemory_exporter() -> None:
 
 
 _ensure_inmemory_exporter()
+
+# Mock modules only when they genuinely can't be imported yet.
+def _ensure_test_module(name: str) -> None:
+    if name in sys.modules:
+        return
+    try:
+        import_module(name)
+    except ModuleNotFoundError:
+        sys.modules[name] = MagicMock()
+
+
+_ensure_test_module("src.core.observability")
+_ensure_test_module("src.core.tracing")

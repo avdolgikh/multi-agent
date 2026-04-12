@@ -7,6 +7,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Sequence
 
+from core.observability import init_observability
 from core.state import SnapshotStore
 from core.tracing import TracingManager
 
@@ -104,6 +105,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     target = Path(args.path).expanduser()
     if not target.exists():
         raise SystemExit(f"Target path {target} does not exist")
+    init_observability("orchestration-code-analysis")
     orchestrator = _build_default_orchestrator()
     result = asyncio.run(orchestrator.run(str(target)))
     _print_report(result.report)

@@ -82,7 +82,7 @@ def traced(func: Callable[..., Coroutine[Any, Any, Any]]):
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any):
-        tracer = trace.get_tracer(func.__module__)
+        tracer = _get_tracer(func.__module__)
         attributes = _sanitize_arguments(args, kwargs)
         agent_task = _find_agent_task(args, kwargs)
         span_kwargs: dict[str, Any] = {}
@@ -209,3 +209,10 @@ def _parse_identifier(value: Any) -> int:
         base = 16 if any(char in value.lower() for char in "abcdef") else 10
         return int(value, base)
     raise ValueError("Unsupported trace context identifier")
+
+
+def _get_tracer(module_name: str):
+    provider = TracingManager._provider
+    if provider is not None:
+        return provider.get_tracer(module_name)
+    return trace.get_tracer(module_name)

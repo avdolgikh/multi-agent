@@ -48,6 +48,16 @@ uv run pyright src/
 uv run pytest --tb=short -q
 ```
 
+## See traces live
+
+In one terminal:
+    uv run python scripts/run_phoenix.py
+
+In another:
+    uv run python -m src.orchestration.code_analysis
+
+Open http://localhost:6006 - Agent Graph tab shows the live trace.
+
 ## Build Roadmap
 
 | # | Spec | What It Builds | Status |

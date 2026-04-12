@@ -10,6 +10,8 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.25",
     "httpx>=0.27",
     "pydantic>=2.7",
+    "arize-phoenix",
+    "traceloop-sdk",
 ]
 
 [project.optional-dependencies]
