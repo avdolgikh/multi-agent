@@ -82,9 +82,10 @@ Pipeline tool: `D:\dev\avdolgikh_github_repos\spec-driven-dev-pipeline`
 | # | Task ID | Spec | Status |
 |---|---------|------|--------|
 | 1 | `core-infrastructure` | Shared infrastructure (agents, messaging, tracing, state, resilience) | DONE |
-| 2 | `orchestration-code-analysis` | Orchestrated code analysis pipeline | PENDING |
+| 2 | `orchestration-code-analysis` | Orchestrated code analysis pipeline | DONE (Codex, 2026-04-12) |
 | 3 | `choreography-research` | Event-driven multi-source research | PENDING |
 | 4 | `hybrid-analysis` | Hybrid pattern + comparison harness | PENDING |
+| — | `observability-phase1` | Phoenix + OpenLLMetry wiring (independent) | IN PROGRESS (Codex, 2026-04-12; on branch `observability-phase1` in worktree `../multi-agent-obs`) |
 
 ### Pipeline Run Commands
 ```bash
@@ -146,9 +147,34 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 - **Verification**: PASSED — 19/19 tests, exit 0
 
 ### Pending Specs
-- `orchestration-code-analysis` — ready to start (core-infrastructure complete)
-- `choreography-research` — waiting for orchestration to complete  
+- `choreography-research` — waiting for user to proceed
 - `hybrid-analysis` — waiting for choreography to complete
+- `observability-phase1` — in progress on branch `observability-phase1` (Codex)
+
+### Run 3: orchestration-code-analysis (FAILED — exit 7, false positive from concurrent host edits)
+- **Provider**: codex (bg `b4819x9eq`)
+- Stage 2 reviewer finished iter 2 review with valid revise JSON; pipeline exited `EXIT_REVIEWER_MODIFIED_FILES`.
+- **Root cause**: concurrent edits to `AGENTS.md` / `specs/` from the host workspace. Pipeline-side fix landed on 2026-04-12 (per-file diff + clear error) — see spec-driven-dev-pipeline AGENTS.md.
+
+### Run 4: orchestration-code-analysis (FAILED — exit 7, same false positive)
+- **Provider**: codex (bg `b6usn101j`, resume)
+- User edited `specs/observability-phase1-spec.md` (APPROVED marker) mid-run → guard tripped again.
+- Motivated the pipeline fix described above.
+
+### Run 5: orchestration-code-analysis (FAILED — exit 2, revision cap at iter 4)
+- **Provider**: codex (bg `bqr2iwz39`, post-pipeline-fix)
+- Stage 2 went 4 iterations of revise/revise-revision; reviewer kept surfacing new items.
+- Iter 4 reviewer raised a legitimate test bug: `test_validation_failure_triggers_rollback` expected `[SCANNING, PARSING]` compensation on security-step failure; spec says only prior completed steps → `[PARSING]`.
+
+### Run 6: orchestration-code-analysis (COMPLETE ✅)
+- **Provider**: codex (bg `bt8yqmxd2`)
+- **Manual fix** before resume: edited `tests/test_orchestration_code_analysis.py` line ~345 to drop SCANNING from expected compensation on security-failure test. Reset `.pipeline-state` iteration to 0.
+- **Stage 2 (Test Review)**: 3 iterations (revise → revise → approve). Tests frozen, hash `90669cf8…`.
+- **Stage 3 (Implementation)**: PASSED first try.
+- **Stage 4 (Validation)**: PASSED.
+- **Stage 5 (Code Review)**: APPROVED iter 0.
+- **Verification**: 34/34 tests passed, exit 0.
+- Final state: `VERIFIED`.
 
 ### How to Resume
 ```bash
