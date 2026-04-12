@@ -85,17 +85,17 @@ Pipeline tool: `D:\dev\avdolgikh_github_repos\spec-driven-dev-pipeline`
 | 2 | `orchestration-code-analysis` | Orchestrated code analysis pipeline | DONE (Codex, 2026-04-12) |
 | 3 | `choreography-research` | Event-driven multi-source research | PENDING |
 | 4 | `hybrid-analysis` | Hybrid pattern + comparison harness | PENDING |
-| — | `observability-phase1` | Phoenix + OpenLLMetry wiring (independent) | IN PROGRESS (Codex, 2026-04-12; on branch `observability-phase1` in worktree `../multi-agent-obs`) |
+| — | `observability-phase1` | Phoenix + OpenLLMetry wiring (independent) | DONE (Codex, 2026-04-12; merged to master) |
 
 ### Pipeline Run Commands
 ```bash
 cd D:/dev/avdolgikh_github_repos/spec-driven-dev-pipeline
 
-# Primary: Codex provider
-uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent
+# Primary: Codex provider (with full validation suite — ruff + format + pyright + pytest)
+uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
 
 # Secondary: Gemini provider
-uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:/dev/avdolgikh_github_repos/multi-agent
+uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
 ```
 
 ### Development Roles
@@ -175,6 +175,23 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 - **Stage 5 (Code Review)**: APPROVED iter 0.
 - **Verification**: 34/34 tests passed, exit 0.
 - Final state: `VERIFIED`.
+
+### Run 7: observability-phase1 (COMPLETE ✅, merged 2026-04-12)
+- **Provider**: codex, isolated worktree `../multi-agent-obs` on branch `observability-phase1`. Early Gemini attempt (bg `bqnsn54ho`) failed on quota → switched to Codex.
+- Codex first run (bg `bg5oejfzj`) hit revision cap at iter 4 with two legitimate reviewer blockers (README demo command assertion + smoke test service-name check).
+- **Manual fix** + resume (bg `bxqptkmy3`): added the two assertions, reset state iter→0. All stages approved first-try. 26/26 frozen tests passed in-worktree.
+- **Merge to master**: rebased onto master, resolved 2 conflicts (`__init__.py`, `__main__.py`) by keeping master's full orchestrator and adding `init_observability("orchestration-code-analysis")` in `main()`.
+- **Post-rebase test failures** (fixed in commit `fbcb717`):
+  - Smoke test exited 1: demo file had no functions/classes → `StepValidator` rejected. Fixed test to use `def demo(): ...`.
+  - Pydantic `ValidationError` in orchestrator: `runpy.run_module("src.orchestration.code_analysis", ...)` caused a dual-import (`src.*` vs non-`src.*`) — two different `QualityResult` classes failing isinstance. Fixed by switching the smoke test to `runpy.run_module("orchestration.code_analysis", ...)` (matches master's CLI test convention).
+  - `test_distributed_tracing_records_child_spans` flaky: OTel's global TracerProvider is set-once; smoke test poisoned it. Fixed via autouse `_reset_tracer_provider_state` fixture in `conftest.py` (resets `TracingManager._provider` + `opentelemetry.trace._TRACER_PROVIDER(_SET_ONCE)`).
+  - CLI entry tests printed Traceloop "missing API key" + tried real OTLP HTTP to localhost:6006. Fixed via autouse `_stub_external_telemetry` fixture in `conftest.py` (stubs `traceloop.sdk.Traceloop.init` + OTLP HTTP exporter globally). Enforces the unit-test rule codified in Conventions.
+- CI: green on master after merge.
+
+### Lessons learned (2026-04-12)
+- **Branch-before-merge spec work risks divergence.** `observability-phase1` was cut before `orchestration-code-analysis` merged → rebase conflicts on files the pipeline added to both sides. Prefer: sequence specs, or rebase the feature branch onto master before the pipeline's Stage 4 runs.
+- **Pipeline tests can't catch post-merge integration bugs.** The pipeline validated tests-in-worktree (26/26 green). Dual-import + OTel set-once only surfaced after merge integrated master's richer orchestrator. Plan: extend pipeline to also validate on a trial-merged tree (future task).
+- **Unit-test isolation is load-bearing.** Autouse fixtures to stub external I/O and reset OTel globals prevent both leaked external calls and cross-test state pollution. Codified in Conventions; apply to all future specs.
 
 ### How to Resume
 ```bash

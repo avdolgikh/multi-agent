@@ -1,0 +1,10 @@
+# Pipeline config for multi-agent repo.
+# Enforces the full CI validation suite (ruff + format + pyright + pytest)
+# inside the pipeline, so agents can't merge code that would fail CI after push.
+
+validation_commands = [
+    ["uv", "run", "ruff", "check", "src/", "tests/"],
+    ["uv", "run", "ruff", "format", "--check", "src/", "tests/"],
+    ["uv", "run", "pyright", "src/"],
+    ["uv", "run", "python", "-m", "pytest"],
+]
