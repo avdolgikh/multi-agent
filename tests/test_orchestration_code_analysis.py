@@ -29,7 +29,10 @@ from orchestration.code_analysis.orchestrator import (
     InvalidTransitionError,
     PipelineResult,
 )
-from orchestration.code_analysis.saga import CompensationResult as SagaCompensationResult, SagaCoordinator
+from orchestration.code_analysis.saga import (
+    CompensationResult as SagaCompensationResult,
+    SagaCoordinator,
+)
 from orchestration.code_analysis.validation import StepValidator
 
 STEP_PARSING = CodeAnalysisOrchestrator.STEP_PARSING
@@ -84,7 +87,8 @@ def _sample_quality_result(
 ) -> QualityResult:
     return QualityResult(
         score=score,
-        issues=issues or [
+        issues=issues
+        or [
             QualityIssue(
                 location="compute",
                 description="Function is missing documentation.",
@@ -159,7 +163,9 @@ def _normalize_step_result(value: Any) -> Any:
 
 def _find_results_map(input_data: dict[str, Any]) -> dict[str, Any]:
     for value in input_data.values():
-        if isinstance(value, dict) and {STEP_PARSING, STEP_SCANNING, STEP_CHECKING}.intersection(value):
+        if isinstance(value, dict) and {STEP_PARSING, STEP_SCANNING, STEP_CHECKING}.intersection(
+            value
+        ):
             return value
     raise AssertionError("Unable to locate the accumulating results map in task input_data")
 
@@ -261,12 +267,12 @@ async def _run_sample_pipeline(
     security_execute_builder: AgentExecuteBuilder | None = None,
     quality_execute_builder: AgentExecuteBuilder | None = None,
     report_execute_builder: AgentExecuteBuilder | None = None,
-    ) -> tuple[
-        PipelineResult,
-        CodeAnalysisOrchestrator,
-        SnapshotStore,
-        SagaCoordinator,
-    ]:
+) -> tuple[
+    PipelineResult,
+    CodeAnalysisOrchestrator,
+    SnapshotStore,
+    SagaCoordinator,
+]:
     parse_result = parse_result or _sample_parse_result()
     security_result = security_result or _sample_security_result()
     quality_result = quality_result or _sample_quality_result()
@@ -384,10 +390,7 @@ async def test_validation_failure_triggers_rollback(tmp_path):
     assert result.status == "rolled_back"
     assert isinstance(result.error, str) and result.error.strip()
     assert recording_saga.compensation_results
-    assert (
-        recording_saga.compensation_results[-1].steps_compensated
-        == [STEP_PARSING]
-    )
+    assert recording_saga.compensation_results[-1].steps_compensated == [STEP_PARSING]
     assert STEP_REPORTING not in result.step_results
 
 
@@ -502,26 +505,23 @@ async def test_agents_receive_previous_results_and_input_path(tmp_path):
         assert task.input_data.get("input_path") == expected_path
 
     security_results = _find_results_map(captured_tasks["security"].input_data)
-    assert (
-        _normalize_step_result(security_results[STEP_PARSING])
-        == _normalize_step_result(parse_result)
+    assert _normalize_step_result(security_results[STEP_PARSING]) == _normalize_step_result(
+        parse_result
     )
 
     quality_results = _find_results_map(captured_tasks["quality"].input_data)
-    assert (
-        _normalize_step_result(quality_results[STEP_PARSING])
-        == _normalize_step_result(parse_result)
+    assert _normalize_step_result(quality_results[STEP_PARSING]) == _normalize_step_result(
+        parse_result
     )
-    assert (
-        _normalize_step_result(quality_results[STEP_SCANNING])
-        == _normalize_step_result(security_result)
+    assert _normalize_step_result(quality_results[STEP_SCANNING]) == _normalize_step_result(
+        security_result
     )
 
     report_results = _find_results_map(captured_tasks["report"].input_data)
-    assert (
-        _normalize_step_result(report_results[STEP_CHECKING])
-        == _normalize_step_result(quality_result)
+    assert _normalize_step_result(report_results[STEP_CHECKING]) == _normalize_step_result(
+        quality_result
     )
+
 
 @pytest.mark.asyncio
 async def test_saga_compensates_on_quality_failure(tmp_path):
@@ -536,10 +536,10 @@ async def test_saga_compensates_on_quality_failure(tmp_path):
     assert result.status == "rolled_back"
     assert STEP_REPORTING not in result.step_results
     assert recording_saga.compensation_results
-    assert (
-        recording_saga.compensation_results[-1].steps_compensated[:2]
-        == [STEP_SCANNING, STEP_PARSING]
-    )
+    assert recording_saga.compensation_results[-1].steps_compensated[:2] == [
+        STEP_SCANNING,
+        STEP_PARSING,
+    ]
 
 
 @pytest.mark.asyncio

@@ -12,9 +12,7 @@ from core.tracing import inject_context
 from .models import (
     AnalysisReport,
     ParseResult,
-    QualityIssue,
     QualityResult,
-    SecurityFinding,
     SecurityResult,
     StepResult,
 )

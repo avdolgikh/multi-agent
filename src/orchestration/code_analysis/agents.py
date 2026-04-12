@@ -48,8 +48,8 @@ class ParserAgent(BaseAgent):
         if not input_path:
             raise ValueError("ParserAgent requires an input_path")
         sources = await _gather_sources(input_path)
-        functions: list[FunctionDescriptor] = []
-        classes: list[ClassDescriptor] = []
+        functions: list[FunctionDescriptor | dict[str, Any]] = []
+        classes: list[ClassDescriptor | dict[str, Any]] = []
         imports: set[str] = set()
         dependencies: dict[str, str] = {}
         for file_path, content in sources.items():
@@ -219,7 +219,9 @@ class QualityAgent(BaseAgent):
     def _estimate_complexity(self, node: ast.FunctionDef) -> int:
         complexity = 1
         for child in ast.walk(node):
-            if isinstance(child, (ast.If, ast.For, ast.While, ast.Try, ast.With, ast.BoolOp, ast.Match)):
+            if isinstance(
+                child, (ast.If, ast.For, ast.While, ast.Try, ast.With, ast.BoolOp, ast.Match)
+            ):
                 complexity += 1
         return complexity
 
@@ -233,7 +235,9 @@ class ReportAgent(BaseAgent):
         recommendations = self._build_recommendations(security_result, quality_result)
         report = AnalysisReport(
             executive_summary=self._build_summary(parse_result, quality_result),
-            security_section={"findings": [finding.description for finding in security_result.findings]},
+            security_section={
+                "findings": [finding.description for finding in security_result.findings]
+            },
             quality_section={
                 "score": quality_result.score,
                 "issues": [issue.description for issue in quality_result.issues],
@@ -264,9 +268,7 @@ class ReportAgent(BaseAgent):
     def _build_summary(self, parse_result: ParseResult, quality_result: QualityResult) -> str:
         functions = len(parse_result.functions)
         classes = len(parse_result.classes)
-        return (
-            f"Analyzed {functions} functions and {classes} classes with quality score {quality_result.score}."
-        )
+        return f"Analyzed {functions} functions and {classes} classes with quality score {quality_result.score}."
 
     def _build_recommendations(
         self,

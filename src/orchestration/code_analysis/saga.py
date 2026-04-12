@@ -21,7 +21,9 @@ class SagaCoordinator:
         self._lock = asyncio.Lock()
         self._stack: list[tuple[str, Callable[[], Awaitable[None] | None]]] = []
 
-    async def register_step(self, step: str, compensate: Callable[[], Awaitable[None] | None]) -> None:
+    async def register_step(
+        self, step: str, compensate: Callable[[], Awaitable[None] | None]
+    ) -> None:
         async with self._lock:
             self._stack.append((step, compensate))
 
