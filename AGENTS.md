@@ -84,8 +84,11 @@ Pipeline tool: `D:\dev\avdolgikh_github_repos\spec-driven-dev-pipeline`
 | 1 | `core-infrastructure` | Shared infrastructure (agents, messaging, tracing, state, resilience) | DONE |
 | 2 | `orchestration-code-analysis` | Orchestrated code analysis pipeline | DONE (Codex, 2026-04-12) |
 | 3 | `choreography-research` | Event-driven multi-source research | DONE (Codex, 2026-04-12) |
-| 4 | `hybrid-analysis` | Hybrid pattern + comparison harness | PENDING |
+| 4 | `vertical-validation` | **Next**: scaffolding only (fixtures + CLI runner) so we can manually exercise shipped verticals vs real Ollama + Phoenix | PENDING |
+| 5 | `hybrid-analysis` | Hybrid pattern + comparison harness | PENDING (blocked on vertical-validation runbook findings) |
 | — | `observability-phase1` | Phoenix + OpenLLMetry wiring (independent) | DONE (Codex, 2026-04-12; merged to master) |
+
+> **`vertical-validation` is split**: the *spec* (`specs/vertical-validation-spec.md`) is pipeline-implementable scaffolding only — fixtures + CLI runner, all externals mocked, pytest-verifiable. The *runbook* (`docs/vertical-validation-runbook.md`) is manual — human runs Ollama + Phoenix, inspects traces, writes findings doc. Pipeline builds the rails; human drives the car. Findings feed into `hybrid-analysis`.
 
 ### Pipeline Run Commands
 ```bash
