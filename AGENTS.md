@@ -83,7 +83,7 @@ Pipeline tool: `D:\dev\avdolgikh_github_repos\spec-driven-dev-pipeline`
 |---|---------|------|--------|
 | 1 | `core-infrastructure` | Shared infrastructure (agents, messaging, tracing, state, resilience) | DONE |
 | 2 | `orchestration-code-analysis` | Orchestrated code analysis pipeline | DONE (Codex, 2026-04-12) |
-| 3 | `choreography-research` | Event-driven multi-source research | PENDING |
+| 3 | `choreography-research` | Event-driven multi-source research | DONE (Codex, 2026-04-12) |
 | 4 | `hybrid-analysis` | Hybrid pattern + comparison harness | PENDING |
 | — | `observability-phase1` | Phoenix + OpenLLMetry wiring (independent) | DONE (Codex, 2026-04-12; merged to master) |
 
@@ -193,11 +193,29 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 - **Pipeline tests can't catch post-merge integration bugs.** The pipeline validated tests-in-worktree (26/26 green). Dual-import + OTel set-once only surfaced after merge integrated master's richer orchestrator. Plan: extend pipeline to also validate on a trial-merged tree (future task).
 - **Unit-test isolation is load-bearing.** Autouse fixtures to stub external I/O and reset OTel globals prevent both leaked external calls and cross-test state pollution. Codified in Conventions; apply to all future specs.
 
+### Run 8: choreography-research (IN PROGRESS — paused on Codex quota 2026-04-12)
+- **Provider**: codex.
+- **First attempt** (bg `bozb5znpo`): hit Stage 2 revision cap at iter 4 with two legitimate reviewer blockers — (a) no test for "no agent calls another agent directly" choreography guarantee (spec §Constraints 1); (b) `ResearchBrief` must be a Pydantic model per spec §3.7. Same Run 5→6 pattern.
+- **Manual fix**: appended three tests at tail of `tests/test_choreography_research.py` — `test_initiator_agent_has_no_direct_references_to_other_agents` (structural source check), `test_initiator_publishes_research_requested_as_first_event` (runtime first-event check), `test_research_brief_is_pydantic_model_with_required_fields` (model + typed-field check). Reset `.pipeline-state` iter→0.
+- **Resume attempt** (bg `besylnv1q`): progressed all the way through Stage 2 approval (4 more iters, hash `33252be4…`), Stage 3 impl first-try, Stage 4 validation **60/60 green** (full suite: ruff + format + pyright + pytest — `pipeline-config.toml` working as designed), Stage 5 Code Review iter 1 revise (legit spec gaps: hardcoded findings, deterministic brief, empty `research_id` default), Stage 5 Code Review iter 2 revise (timeline ordering bug — see below).
+- **Paused**: Stage 5b iter 2 implementer revision failed with Codex OpenAI quota (`try again at 6:58 PM`). Pipeline exit 9. State intact.
+- **Pending reviewer blocker**: `reconstruct_timeline` sorts by `timestamp`; `SearchAgent` uses `context.started_at` for findings, which can be ≤ `ResearchRequested`'s timestamp → `FindingDiscovered` sorts before `ResearchRequested`, breaking the initiator-first-event test. Fix direction: sort timeline by event store sequence. Caught by the choreography test added in the manual fix above.
+- **Next session resume**: re-run the same command (state resumes from CODE_VALIDATED iter 2). See `memory/project_choreography_research_resume.md` for the one-line command and full protocol.
+
+### Run 8 (resumed): choreography-research (COMPLETE ✅, 2026-04-12 19:04 local)
+- **Provider**: codex (bg `byd1x9505`, resume after quota reset).
+- Pipeline resumed at `CODE_VALIDATED iter 2`. Codex revised implementation for the timeline ordering bug (FindingDiscovered sorting before ResearchRequested) plus remaining iter-1 items.
+- **Stage 4 Validation (iter 4 post-revision)**: 60/60 tests green; ruff + format + pyright + pytest all clean.
+- **Stage 5 Code Review iter 4**: APPROVED — "All choreography-research requirements appear satisfied, and the full validation suite passes."
+- **Verification gate**: 60/60 tests passed, ruff + format + pyright clean.
+- Final state: `VERIFIED`. Frozen tests hash `33252be4…`.
+- **Lessons confirmed**: the Run 5→6 manual-test-addition pattern continues to be the right escape hatch for legit blockers hitting the revision cap; the `pipeline-config.toml` full validation suite caught the timeline-ordering regression before merge.
+
 ### How to Resume
 ```bash
 # Pipeline state is saved to .pipeline-state/. Just re-run:
 cd D:/dev/avdolgikh_github_repos/spec-driven-dev-pipeline
-uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent
+uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
 
 # To start spec fresh, delete state first:
 rm -rf D:/dev/avdolgikh_github_repos/multi-agent/.pipeline-state
