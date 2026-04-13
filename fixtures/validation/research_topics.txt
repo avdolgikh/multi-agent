@@ -1,0 +1,4 @@
+event sourcing vs cqrs tradeoffs in fintech ledgers
+strategies for mocking tracing exporters in asyncio tests
+impact of llm-generated code reviews on saga orchestrators
+techniques for benchmarking in-memory message buses safely

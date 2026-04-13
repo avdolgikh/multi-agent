@@ -1,6 +1,6 @@
 # Spec: Vertical Validation — Scaffolding
 
-DRAFT
+APPROVED
 
 ## Goal
 
