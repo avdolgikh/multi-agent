@@ -27,7 +27,7 @@ from orchestration.code_analysis.models import (
 from orchestration.code_analysis.orchestrator import CodeAnalysisOrchestrator
 from orchestration.code_analysis.validation import StepValidator
 from orchestration.code_analysis.saga import SagaCoordinator
-from tests import test_orchestration_code_analysis as legacy_tests
+import test_orchestration_code_analysis as legacy_tests
 
 
 @dataclass
