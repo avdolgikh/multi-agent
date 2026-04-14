@@ -176,7 +176,9 @@ async def test_news_search_agent_surfaces_llm_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_academic_search_agent_uses_fallback_summary_when_llm_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_academic_search_agent_uses_fallback_summary_when_llm_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _raise_call_llm(self: BaseAgent, messages: Sequence[Any]) -> SimpleNamespace:
         raise RuntimeError("llm unavailable")
 
@@ -205,4 +207,3 @@ async def test_academic_search_agent_uses_fallback_summary_when_llm_fails(monkey
     assert payload["summary"]
     assert payload["summary"].startswith("Findings for")
     assert payload["raw_content"] == "Tool abstract that still needs to be preserved."
-
