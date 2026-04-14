@@ -56,6 +56,28 @@ src/
 - `PHOENIX_HOST` / `PHOENIX_PORT` — bind address for `scripts/run_phoenix.py`
   (defaults `127.0.0.1` / `6006`; gRPC ingestion on `4317` is fixed upstream).
   Phoenix's own CLI does **not** take `--host` / `--port` — use env vars.
+- `PHOENIX_URL` — base URL used by `scripts/phoenix_trace.py` (default
+  `http://localhost:6006`). The script pulls a trace via Phoenix's GraphQL
+  endpoint (`/graphql`) so we can inspect span trees from the terminal
+  without opening the browser.
+
+### Inspecting a Phoenix trace from the terminal
+
+```bash
+# list projects
+uv run python scripts/phoenix_trace.py --list-projects <anyid>
+
+# fetch a specific trace (auto-discovers the project)
+PYTHONIOENCODING=utf-8 uv run python scripts/phoenix_trace.py <TRACE_ID>
+
+# dump raw span JSON
+uv run python scripts/phoenix_trace.py <TRACE_ID> --raw
+```
+
+Output: span tree with latencies, plus one line per LLM span
+(prompt/completion tokens, status, output preview). Trace IDs are the 32-hex
+ID in the Phoenix URL. A healthy `code_analysis.pipeline` run is **13 spans**:
+1 root + 4 `STAGE.execute` + 4 `Agent.execute` + 4 `Agent.llm`.
 
 ## Dependency Pins (non-obvious)
 
