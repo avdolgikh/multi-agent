@@ -138,6 +138,45 @@ follow-up items.
 - Bugs / tech-debt to fix outside this exercise.
 ```
 
+## Troubleshooting
+
+**Phoenix startup fails with `ModuleNotFoundError: No module named 'phoenix.evals.models'`.**
+`arize-phoenix-evals` 3.0.0 removed the module that `arize-phoenix` 13.x still
+imports. `pyproject.toml` pins `arize-phoenix-evals<3.0.0` to avoid this. If
+you see the error again, confirm the pin is present and re-run `uv sync`.
+
+**Phoenix startup fails with `Failed to bind to address [::]:4317`.**
+Another process still holds OTLP gRPC port 4317 — almost always a prior
+Phoenix that did not shut down cleanly. Find and kill it:
+
+```bash
+# Windows (PowerShell or Git Bash)
+netstat -ano -p tcp | grep -E ":4317|:6006"
+taskkill //F //PID <pid>
+
+# macOS / Linux
+lsof -iTCP:4317 -sTCP:LISTEN
+kill -9 <pid>
+```
+
+Then re-run `scripts/run_phoenix.py`. Ctrl+C in the Phoenix terminal normally
+releases both ports; the leftover happens when the process was killed
+mid-startup.
+
+**`scripts/run_phoenix.py` ignores `--host` / `--port`.**
+It doesn't accept CLI flags. Override via env before the command:
+`PHOENIX_HOST=0.0.0.0 PHOENIX_PORT=7000 uv run python scripts/run_phoenix.py`.
+
+**Ollama model pick.**
+Each vertical hardcodes `model="..."` in its agent wiring. To swap models,
+edit the `model=` kwargs in:
+
+- `src/orchestration/code_analysis/__init__.py` (4 call sites)
+- `src/choreography/research/runner.py` + `agents.py` (6 call sites)
+
+There's no env-var override today — that's a known ergonomic gap; see
+follow-ups.
+
 ## Exit criteria
 
 - Both verticals ran at least once against real Ollama and produced

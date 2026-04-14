@@ -17,7 +17,7 @@ from core.agents import AgentResult, AgentTask, BaseAgent, Tool
 from core.messaging import Message, MessageBus, Subscription
 from core.resilience import DeadLetterQueue
 from core.state import Event, EventStore
-from core.tracing import inject_context
+from core.tracing import inject_context, traced
 
 from . import events as research_events
 
@@ -311,7 +311,9 @@ class InitiatorAgent(BaseChoreographyAgent):
             return payload
         return research_events.ResearchRequested.model_validate(payload)
 
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        logger.info("InitiatorAgent.execute task_id=%s", task.task_id)
         publisher = self._require_publisher()
         deadline = task.input_data.get("deadline")
         payload_data: dict[str, Any] = {
@@ -367,7 +369,14 @@ class SearchAgent(BaseChoreographyAgent):
         await self._subscribe(research_events.ResearchRequested, self._handle_request)
         await self._subscribe(research_events.CrossReferenceFound, self._handle_cross_reference)
 
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        logger.info(
+            "SearchAgent.execute agent_id=%s source_type=%s task_id=%s",
+            self.agent_id,
+            self.source_type,
+            task.task_id,
+        )
         findings = await self._generate_findings(task)
         return AgentResult(
             task_id=task.task_id,
@@ -539,7 +548,7 @@ class WebSearchAgent(SearchAgent):
             findings_limit=2,
             agent_id="web-search",
             name="Web Search Agent",
-            model="qwen3-coder:latest",
+            model="glm-4.7-flash:latest",
             provider="ollama",
             system_prompt="Summarize recent web findings.",
             **kwargs,
@@ -577,7 +586,7 @@ class AcademicSearchAgent(SearchAgent):
             findings_limit=1,
             agent_id="academic-search",
             name="Academic Scholar Agent",
-            model="qwen3.5:latest",
+            model="glm-4.7-flash:latest",
             provider="ollama",
             system_prompt="Summarize academic findings.",
             **kwargs,
@@ -616,7 +625,7 @@ class CodeAnalysisAgent(SearchAgent):
             findings_limit=1,
             agent_id="code-search",
             name="Code Analysis Agent",
-            model="qwen3-coder:latest",
+            model="glm-4.7-flash:latest",
             provider="ollama",
             system_prompt="Inspect repositories related to the topic.",
             **kwargs,
@@ -690,7 +699,7 @@ class CrossReferenceAgent(BaseChoreographyAgent):
         super().__init__(
             agent_id="cross-reference",
             name="Cross Reference Agent",
-            model="qwen3.5:latest",
+            model="glm-4.7-flash:latest",
             provider="ollama",
             system_prompt="Connect semantically similar findings.",
             tools=[],
@@ -719,7 +728,9 @@ class CrossReferenceAgent(BaseChoreographyAgent):
             self._finding_task = None
         await super().stop()
 
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        logger.info("CrossReferenceAgent.execute task_id=%s", task.task_id)
         return AgentResult(
             task_id=task.task_id,
             agent_id=self.agent_id,
@@ -859,7 +870,9 @@ class AggregatorAgent(BaseChoreographyAgent):
             research_events.CrossReferenceStatus, self._record_cross_reference_status
         )
 
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        logger.info("AggregatorAgent.execute task_id=%s", task.task_id)
         return AgentResult(
             task_id=task.task_id,
             agent_id=self.agent_id,

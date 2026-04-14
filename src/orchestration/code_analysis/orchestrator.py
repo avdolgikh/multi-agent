@@ -106,7 +106,9 @@ class CodeAnalysisOrchestrator:
         self.saga = saga
         self.snapshot_store = snapshot_store
         if tracer_provider is not None:
-            trace.set_tracer_provider(tracer_provider)
+            current = trace.get_tracer_provider()
+            if current is not tracer_provider:
+                trace.set_tracer_provider(tracer_provider)
         self._tracer = trace.get_tracer("orchestration.code_analysis")
         self._state: PipelineState | None = None
         self._workflow_id: str | None = None

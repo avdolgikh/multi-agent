@@ -275,7 +275,7 @@ wheels = [
 
 [[package]]
 name = "arize-phoenix-evals"
-version = "3.0.0"
+version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonpath-ng" },
@@ -288,9 +288,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/99/32/46cd1615471c7d6159057b90d5c5b142bce0d949eba263e47bf1afbdf48e/arize_phoenix_evals-3.0.0.tar.gz", hash = "sha256:a131da035e029732f2e5ef99344d4bb01212fafc52e8830f80ddf6d6162299d9", size = 79207, upload-time = "2026-04-07T17:14:53.166Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/1b/ad1a3906ab333ce5bf373639e51069ec3b47be7ad0f60528d522eabff7b7/arize_phoenix_evals-2.13.0.tar.gz", hash = "sha256:b0a87ab66aabd6e7bb0982f52476cd4487996ab9e17524b205bdb4e3881d3b16", size = 125204, upload-time = "2026-04-01T01:28:15.753Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/08/bb2bda11ddd756e4f9d3940590766f5822e769677841ccff7eabff360eac/arize_phoenix_evals-3.0.0-py3-none-any.whl", hash = "sha256:0bfe48e6edd9bbb7fa6609814e4ff19f0c2d16222bbd20dc3a89534602874ba2", size = 115196, upload-time = "2026-04-07T17:14:51.416Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/5f/439696a5ee5b4ba40ddb77808b3eb919694631008114487ec696c9808e64/arize_phoenix_evals-2.13.0-py3-none-any.whl", hash = "sha256:db2aa81edc1d0226c3517ea55ed7fcb700c25865feb68e4c5536a9d259f5fbb2", size = 183712, upload-time = "2026-04-01T01:28:14.261Z" },
 ]
 
 [[package]]
@@ -1261,6 +1261,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "arize-phoenix" },
+    { name = "arize-phoenix-evals" },
     { name = "httpx" },
     { name = "openai" },
     { name = "opentelemetry-api" },
@@ -1290,6 +1291,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "arize-phoenix" },
+    { name = "arize-phoenix-evals", specifier = "<3.0.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", specifier = ">=1.30" },
     { name = "opentelemetry-api", specifier = ">=1.25" },

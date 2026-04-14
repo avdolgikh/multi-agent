@@ -53,6 +53,16 @@ src/
 - `OPENAI_API_KEY` — OpenAI API key (fallback only — prefer Ollama)
 - `OLLAMA_BASE_URL` — Ollama API URL (default: `http://localhost:11434/v1`)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — OpenTelemetry collector endpoint (optional)
+- `PHOENIX_HOST` / `PHOENIX_PORT` — bind address for `scripts/run_phoenix.py`
+  (defaults `127.0.0.1` / `6006`; gRPC ingestion on `4317` is fixed upstream).
+  Phoenix's own CLI does **not** take `--host` / `--port` — use env vars.
+
+## Dependency Pins (non-obvious)
+
+- `arize-phoenix-evals<3.0.0` — `arize-phoenix-evals==3.0.0` drops
+  `phoenix.evals.models`, which `arize-phoenix==13.21` still imports. Pinning
+  <3.0.0 is required until Phoenix upstream catches up. Remove the pin only
+  after verifying `uv run python scripts/run_phoenix.py` still starts.
 
 ## Current Constraints
 

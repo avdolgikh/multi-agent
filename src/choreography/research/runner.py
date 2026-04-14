@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 from core.messaging import InMemoryBus, Message, MessageBus, Subscription
+from core.observability import init_observability
 from core.resilience import DeadLetterQueue
 from core.state import EventStore
 
@@ -89,7 +90,7 @@ class ResearchRunner:
                 completion_future=completion_future,
                 agent_id="aggregator",
                 name="Aggregator Agent",
-                model="qwen3.5:latest",
+                model="glm-4.7-flash:latest",
                 provider="ollama",
                 system_prompt="Summarize research findings.",
                 tools=[],
@@ -127,7 +128,7 @@ class ResearchRunner:
             dead_letter_queue=self.dead_letter_queue,
             agent_id="initiator",
             name="Initiator Agent",
-            model="qwen3.5:latest",
+            model="glm-4.7-flash:latest",
             provider="ollama",
             system_prompt="Kick off research requests.",
             tools=[],
@@ -160,6 +161,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Approximate deadline offset in minutes",
     )
     args = parser.parse_args(argv)
+    init_observability("choreography-research")
+    logger.info("choreography.main topic=%r scope=%r", args.topic, args.scope)
     deadline: datetime | None = None
     if args.deadline_minutes:
         deadline = datetime.now(timezone.utc) + timedelta(minutes=args.deadline_minutes)

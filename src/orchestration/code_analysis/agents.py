@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
+import logging
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence, TypeVar, cast
+
+from pydantic import BaseModel, ValidationError
 
 from core.agents import AgentResult, AgentTask, BaseAgent
+from core.messaging import Message
+from core.tracing import traced
 
 from .models import (
     AnalysisReport,
     ClassDescriptor,
     FunctionDescriptor,
     ParseResult,
-    QualityIssue,
     QualityResult,
-    Recommendation,
-    SecurityFinding,
     SecurityResult,
 )
 
@@ -25,7 +29,25 @@ __all__ = [
     "SecurityAgent",
     "QualityAgent",
     "ReportAgent",
+    "LLMResponseFormatError",
 ]
+
+_LOGGER = logging.getLogger(__name__)
+_SOURCE_CHAR_LIMIT = 8000
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+FunctionEntry = FunctionDescriptor | dict[str, Any]
+ClassEntry = ClassDescriptor | dict[str, Any]
+EntryT = TypeVar("EntryT", FunctionEntry, ClassEntry)
+
+
+class LLMResponseFormatError(RuntimeError):
+    """Raised when an LLM response cannot be parsed into the expected schema."""
+
+    def __init__(self, agent_name: str, reason: str) -> None:
+        super().__init__(f"{agent_name} received invalid LLM response: {reason}")
+        self.agent_name = agent_name
+        self.reason = reason
 
 
 async def _gather_sources(input_path: str) -> dict[Path, str]:
@@ -42,8 +64,120 @@ async def _gather_sources(input_path: str) -> dict[Path, str]:
     return contents
 
 
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, indent=2, default=str)
+
+
+def _strip_code_fence(payload: str) -> str:
+    clean = payload.strip()
+    if clean.startswith("```"):
+        lines = clean.splitlines()
+        if len(lines) >= 2 and lines[0].lstrip("`").startswith("json"):
+            lines = lines[1:]
+        if lines and lines[-1].strip("`") == "":
+            lines = lines[:-1]
+        clean = "\n".join(lines).strip("` \n")
+    return clean
+
+
+def _parse_llm_response(
+    *,
+    agent_name: str,
+    model_type: type[ModelT],
+    raw_content: str,
+) -> ModelT:
+    clean = _strip_code_fence(raw_content)
+    if not clean:
+        raise LLMResponseFormatError(agent_name, "empty response")
+    try:
+        data = json.loads(clean)
+    except json.JSONDecodeError as exc:  # pragma: no cover - exercised in new tests
+        raise LLMResponseFormatError(agent_name, "non-JSON response") from exc
+    try:
+        return model_type.model_validate(data)
+    except ValidationError as exc:  # pragma: no cover - schema enforcement exercised
+        raise LLMResponseFormatError(agent_name, "response did not match schema") from exc
+
+
+@contextmanager
+def _suppress_agent_system_prompt(agent: BaseAgent):
+    original_prompt = agent.system_prompt
+    agent.system_prompt = ""
+    try:
+        yield original_prompt
+    finally:
+        agent.system_prompt = original_prompt
+
+
+async def _call_llm_for_model(
+    *,
+    agent: BaseAgent,
+    user_content: str,
+    model_type: type[ModelT],
+) -> ModelT:
+    with _suppress_agent_system_prompt(agent) as system_prompt:
+        message_payloads = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        response = await agent.call_llm(cast("Sequence[Message]", message_payloads))
+    return _parse_llm_response(
+        agent_name=agent.name,
+        model_type=model_type,
+        raw_content=response.content,
+    )
+
+
+def _format_source_snippets(sources: dict[Path, str]) -> str:
+    parts: list[str] = []
+    for path, content in sources.items():
+        snippet = content[:_SOURCE_CHAR_LIMIT]
+        if len(content) > _SOURCE_CHAR_LIMIT:
+            snippet = f"{snippet}\n...<truncated>"
+        parts.append(f"### {path}\n{snippet}")
+    return "\n\n".join(parts)
+
+
+def _merge_entries(
+    *,
+    base_items: Sequence[EntryT],
+    llm_items: Sequence[EntryT],
+) -> list[EntryT]:
+    merged: dict[str, EntryT] = {}
+
+    def _store_entry(entry: EntryT) -> None:
+        name = _extract_descriptor_name(entry)
+        if name:
+            merged[name] = entry
+        else:
+            merged[f"llm_{len(merged)}"] = entry
+
+    for candidate in base_items:
+        _store_entry(candidate)
+    for candidate in llm_items:
+        _store_entry(candidate)
+    return list(merged.values())
+
+
+def _extract_descriptor_name(value: FunctionEntry | ClassEntry) -> str | None:
+    if isinstance(value, dict):
+        name = value.get("name")
+        return str(name) if isinstance(name, str) else None
+    return getattr(value, "name", None)
+
+
+def _serialize_model(model: BaseModel | dict[str, Any] | list[Any]) -> Any:
+    if isinstance(model, BaseModel):
+        return model.model_dump()
+    if isinstance(model, list):
+        return [_serialize_model(item) for item in model]
+    return model
+
+
 class ParserAgent(BaseAgent):
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        _LOGGER.info("ParserAgent.execute task_id=%s", task.task_id)
         input_path = task.input_data.get("input_path")
         if not input_path:
             raise ValueError("ParserAgent requires an input_path")
@@ -64,16 +198,44 @@ class ParserAgent(BaseAgent):
                     if module_name:
                         imports.add(module_name)
                         dependencies[module_name] = "external"
-        parse_result = ParseResult(
+        heuristic = ParseResult(
             functions=functions,
             classes=classes,
             imports=sorted(imports),
             dependencies=dependencies,
         )
+        user_content = "\n\n".join(
+            [
+                "Confirm, correct, or enrich the structural summary of the repository. "
+                "Return JSON that matches the ParseResult schema.",
+                "Respond with JSON only. Do not wrap the payload in code fences.",
+                f"JSON schema:\n{_json_dumps(ParseResult.model_json_schema())}",
+                f"AST context:\n{_json_dumps(heuristic.model_dump())}",
+                f"Source code (truncated to {_SOURCE_CHAR_LIMIT} chars per file):\n"
+                f"{_format_source_snippets(sources)}",
+            ]
+        )
+        llm_result = await _call_llm_for_model(
+            agent=self,
+            user_content=user_content,
+            model_type=ParseResult,
+        )
+        merged = ParseResult(
+            functions=_merge_entries(
+                base_items=heuristic.functions,
+                llm_items=llm_result.functions,
+            ),
+            classes=_merge_entries(
+                base_items=heuristic.classes,
+                llm_items=llm_result.classes,
+            ),
+            imports=sorted(set(heuristic.imports).union(llm_result.imports)),
+            dependencies={**heuristic.dependencies, **llm_result.dependencies},
+        )
         return AgentResult(
             task_id=task.task_id,
             agent_id=self.agent_id,
-            output_data={"result": parse_result},
+            output_data={"result": merged},
             status="success",
             error=None,
             duration_ms=0.0,
@@ -117,99 +279,188 @@ class ParserAgent(BaseAgent):
 
 
 class SecurityAgent(BaseAgent):
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        _LOGGER.info("SecurityAgent.execute task_id=%s", task.task_id)
         input_path = task.input_data.get("input_path")
         if not input_path:
             raise ValueError("SecurityAgent requires an input_path")
         sources = await _gather_sources(input_path)
-        findings: list[SecurityFinding] = []
-        for path, content in sources.items():
-            findings.extend(self._scan_content(path, content))
-        result = SecurityResult(findings=findings)
+        candidates = self._collect_candidates(sources)
+        context = {
+            "candidate_summary": {"count": len(candidates)},
+            "candidates": candidates,
+        }
+        user_content = "\\n\\n".join(
+            [
+                "Review the Python source for OWASP issues, hardcoded secrets, and risky APIs. "
+                "Use the candidate list as hints but verify findings yourself.",
+                "Return JSON that matches the SecurityResult schema with severity, location, description, "
+                "and recommendation for each finding.",
+                "Respond with JSON only.",
+                f"JSON schema:\\n{_json_dumps(SecurityResult.model_json_schema())}",
+                f"AST context:\\n{_json_dumps(context)}",
+                f"Source code (truncated to {_SOURCE_CHAR_LIMIT} chars per file):\\n"
+                f"{_format_source_snippets(sources)}",
+            ]
+        )
+        llm_result = await _call_llm_for_model(
+            agent=self,
+            user_content=user_content,
+            model_type=SecurityResult,
+        )
         return AgentResult(
             task_id=task.task_id,
             agent_id=self.agent_id,
-            output_data={"result": result},
+            output_data={"result": llm_result},
             status="success",
             error=None,
             duration_ms=0.0,
             trace_context=task.trace_context or {},
         )
 
-    def _scan_content(self, path: Path, content: str) -> list[SecurityFinding]:
-        issues: list[SecurityFinding] = []
+    def _collect_candidates(self, sources: dict[Path, str]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for path, content in sources.items():
+            candidates.extend(self._scan_content(path, content))
+        return candidates
+
+    def _scan_content(self, path: Path, content: str) -> list[dict[str, Any]]:
         lowered = content.lower()
+        records: list[dict[str, Any]] = []
         if "password" in lowered or "secret" in lowered:
-            issues.append(
-                SecurityFinding(
-                    severity="high",
-                    location=f"{path.name}:1",
-                    description="Possible hardcoded credential detected",
-                    recommendation="Load sensitive data from environment variables instead.",
+            lineno, line = self._find_line(content, ["password", "secret"])
+            records.append(
+                self._build_candidate(
+                    path=path,
+                    lineno=lineno,
+                    indicator="credential",
+                    reason="Possible hardcoded credential detected.",
+                    snippet=line,
                 )
             )
         if "os.system" in lowered or "subprocess" in lowered:
-            issues.append(
-                SecurityFinding(
-                    severity="medium",
-                    location=f"{path.name}:1",
-                    description="Shell execution detected; ensure inputs are sanitized",
-                    recommendation="Use subprocess with explicit arguments and validate inputs.",
+            lineno, line = self._find_line(content, ["os.system", "subprocess"])
+            records.append(
+                self._build_candidate(
+                    path=path,
+                    lineno=lineno,
+                    indicator="shell_execution",
+                    reason="Shell execution detected; ensure inputs are sanitized.",
+                    snippet=line,
                 )
             )
         if "eval(" in lowered or "exec(" in lowered:
-            issues.append(
-                SecurityFinding(
-                    severity="critical",
-                    location=f"{path.name}:1",
-                    description="Dynamic code execution detected",
-                    recommendation="Avoid eval/exec with untrusted input.",
+            lineno, line = self._find_line(content, ["eval(", "exec("])
+            records.append(
+                self._build_candidate(
+                    path=path,
+                    lineno=lineno,
+                    indicator="dynamic_code",
+                    reason="Dynamic code execution function referenced.",
+                    snippet=line,
                 )
             )
-        return issues
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            normalized = line.lower()
+            if "select" in normalized and "+" in line:
+                records.append(
+                    self._build_candidate(
+                        path=path,
+                        lineno=lineno,
+                        indicator="sql_concat",
+                        reason="SQL query appears to be built via string concatenation.",
+                        snippet=line.strip(),
+                    )
+                )
+        return records
+
+    def _build_candidate(
+        self,
+        *,
+        path: Path,
+        lineno: int,
+        indicator: str,
+        reason: str,
+        snippet: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "path": str(path),
+            "line": lineno,
+            "indicator": indicator,
+            "reason": reason,
+            "snippet": snippet,
+        }
+
+    def _find_line(self, content: str, keywords: list[str]) -> tuple[int, str]:
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            lowered = line.lower()
+            if any(keyword in lowered for keyword in keywords):
+                return lineno, line.strip()
+        return 1, ""
 
 
 class QualityAgent(BaseAgent):
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        _LOGGER.info("QualityAgent.execute task_id=%s", task.task_id)
         input_path = task.input_data.get("input_path")
         if not input_path:
             raise ValueError("QualityAgent requires an input_path")
         sources = await _gather_sources(input_path)
         complexity_scores: Counter[str] = Counter()
-        issues: list[QualityIssue] = []
+        long_functions: list[dict[str, Any]] = []
         for path, content in sources.items():
             module = ast.parse(content or "", filename=str(path))
             for node in module.body:
                 if isinstance(node, ast.FunctionDef):
                     complexity = self._estimate_complexity(node)
                     complexity_scores[node.name] += complexity
-                    if complexity > 10:
-                        issues.append(
-                            QualityIssue(
-                                location=node.name,
-                                description="Function complexity exceeds recommended threshold",
-                                severity="medium",
-                            )
-                        )
                     length = (getattr(node, "end_lineno", node.lineno) - node.lineno) + 1
                     if length > 50:
-                        issues.append(
-                            QualityIssue(
-                                location=node.name,
-                                description="Function exceeds 50 lines; consider refactoring",
-                                severity="low",
-                            )
+                        long_functions.append(
+                            {
+                                "path": str(path),
+                                "function": node.name,
+                                "line_range": self._line_range(node),
+                                "length": length,
+                            }
                         )
-        score = max(0, 100 - len(issues) * 5)
-        result = QualityResult(
-            score=score,
-            issues=issues,
-            metrics={"cyclomatic_complexity": dict(complexity_scores)},
+        heuristics = {
+            "cyclomatic_complexity": dict(complexity_scores),
+            "long_functions": long_functions,
+        }
+        user_content = "\\n\\n".join(
+            [
+                "Review the code for maintainability issues, logic bugs, and boundary mistakes. "
+                "Return a QualityResult JSON payload with score, issues, and metrics.",
+                "Use the metrics to ground your reasoning but make independent judgments.",
+                "For every issue, `location` MUST be a function or class name taken "
+                "from the AST context (e.g., 'compute_average_off_by_one'). Do NOT use "
+                "file paths, line numbers, or other formats.",
+                "Respond with JSON only.",
+                f"JSON schema:\\n{_json_dumps(QualityResult.model_json_schema())}",
+                f"AST context:\\n{_json_dumps(heuristics)}",
+                f"Source code (truncated to {_SOURCE_CHAR_LIMIT} chars per file):\\n"
+                f"{_format_source_snippets(sources)}",
+            ]
+        )
+        llm_result = await _call_llm_for_model(
+            agent=self,
+            user_content=user_content,
+            model_type=QualityResult,
+        )
+        metrics = dict(llm_result.metrics)
+        metrics["cyclomatic_complexity"] = heuristics["cyclomatic_complexity"]
+        quality_result = QualityResult(
+            score=llm_result.score,
+            issues=llm_result.issues,
+            metrics=metrics,
         )
         return AgentResult(
             task_id=task.task_id,
             agent_id=self.agent_id,
-            output_data={"result": result},
+            output_data={"result": quality_result},
             status="success",
             error=None,
             duration_ms=0.0,
@@ -225,24 +476,46 @@ class QualityAgent(BaseAgent):
                 complexity += 1
         return complexity
 
+    def _line_range(self, node: ast.AST) -> str:
+        start = getattr(node, "lineno", 0)
+        end = getattr(node, "end_lineno", start)
+        return f"{start}-{end}"
+
 
 class ReportAgent(BaseAgent):
-    async def execute(self, task: AgentTask) -> AgentResult:
+    @traced  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def execute(self, task: AgentTask) -> AgentResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+        _LOGGER.info("ReportAgent.execute task_id=%s", task.task_id)
+        input_path = task.input_data.get("input_path")
+        if not input_path:
+            raise ValueError("ReportAgent requires an input_path")
+        sources = await _gather_sources(input_path)
         results_map = task.input_data.get("results") or {}
         parse_result = self._find_result(results_map, ParseResult)
         security_result = self._find_result(results_map, SecurityResult)
         quality_result = self._find_result(results_map, QualityResult)
-        recommendations = self._build_recommendations(security_result, quality_result)
-        report = AnalysisReport(
-            executive_summary=self._build_summary(parse_result, quality_result),
-            security_section={
-                "findings": [finding.description for finding in security_result.findings]
-            },
-            quality_section={
-                "score": quality_result.score,
-                "issues": [issue.description for issue in quality_result.issues],
-            },
-            recommendations=recommendations,
+        context = {
+            "input_path": input_path,
+            "parse_result": _serialize_model(parse_result),
+            "security_result": _serialize_model(security_result),
+            "quality_result": _serialize_model(quality_result),
+        }
+        user_content = "\\n\\n".join(
+            [
+                "Produce an AnalysisReport JSON payload summarizing the code analysis. "
+                "Executive summary must cite specific findings, the security section must capture key risks, "
+                "the quality section must describe scores/issues, and recommendations must be prioritized with reasoning.",
+                "Respond with JSON only.",
+                f"JSON schema:\\n{_json_dumps(AnalysisReport.model_json_schema())}",
+                f"AST context:\\n{_json_dumps(context)}",
+                f"Source code (truncated to {_SOURCE_CHAR_LIMIT} chars per file):\\\n"
+                f"{_format_source_snippets(sources)}",
+            ]
+        )
+        report = await _call_llm_for_model(
+            agent=self,
+            user_content=user_content,
+            model_type=AnalysisReport,
         )
         return AgentResult(
             task_id=task.task_id,
@@ -264,40 +537,3 @@ class ReportAgent(BaseAgent):
                 except Exception:  # noqa: BLE001
                     continue
         return model_type()  # type: ignore[call-arg]
-
-    def _build_summary(self, parse_result: ParseResult, quality_result: QualityResult) -> str:
-        functions = len(parse_result.functions)
-        classes = len(parse_result.classes)
-        return f"Analyzed {functions} functions and {classes} classes with quality score {quality_result.score}."
-
-    def _build_recommendations(
-        self,
-        security_result: SecurityResult,
-        quality_result: QualityResult,
-    ) -> list[Recommendation]:
-        recs: list[Recommendation] = []
-        if security_result.findings:
-            recs.append(
-                Recommendation(
-                    title="Address security findings",
-                    priority="high",
-                    detail="Resolve high and critical issues before deployment.",
-                )
-            )
-        if quality_result.score < 90:
-            recs.append(
-                Recommendation(
-                    title="Improve code quality",
-                    priority="medium",
-                    detail="Refactor highlighted functions and add tests.",
-                )
-            )
-        if not recs:
-            recs.append(
-                Recommendation(
-                    title="Maintain current standards",
-                    priority="low",
-                    detail="No critical findings detected.",
-                )
-            )
-        return recs

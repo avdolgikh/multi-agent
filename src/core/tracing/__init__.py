@@ -57,7 +57,12 @@ class TracingManager:
         if cls._provider is not None:
             return cls._provider
 
-        resource = Resource.create({"service.name": service_name})
+        resource = Resource.create(
+            {
+                "service.name": service_name,
+                "openinference.project.name": service_name,
+            }
+        )
         provider = TracerProvider(resource=resource)
         if endpoint:
             exporter = OTLPSpanExporter(endpoint=endpoint)

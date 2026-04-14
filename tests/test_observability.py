@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import json
 import logging
 import runpy
 import sys
 import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any, Sequence
 
 import pytest
 
@@ -63,6 +65,80 @@ def _provide_fake_async_openai(monkeypatch):
             self.usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
             self.model = model
 
+    def _extract_system_prompt(messages: Sequence[Any] | None) -> str:
+        if not messages:
+            return ""
+        for raw in messages:
+            candidate = getattr(raw, "payload", raw)
+            if isinstance(candidate, dict):
+                role = candidate.get("role")
+                if role == "system":
+                    return str(candidate.get("content", ""))
+            else:
+                role = getattr(candidate, "role", None)
+                if role == "system":
+                    return str(getattr(candidate, "content", ""))
+        return ""
+
+    def _orchestration_llm_payload(system_prompt: str) -> dict[str, Any]:
+        normalized = system_prompt.lower()
+        if "structural" in normalized or "structure" in normalized:
+            return {
+                "functions": [
+                    {
+                        "name": "demo",
+                        "params": [],
+                        "return_type": "int",
+                        "line_range": "1-2",
+                    }
+                ],
+                "classes": [],
+                "imports": ["math"],
+                "dependencies": {"math": "stdlib"},
+            }
+        if "owasp" in normalized or "secret" in normalized or "risk" in normalized:
+            return {
+                "findings": [
+                    {
+                        "severity": "medium",
+                        "location": "demo_module.py:1",
+                        "description": "Placeholder security finding.",
+                        "recommendation": "Review secrets and sanitize inputs.",
+                    }
+                ]
+            }
+        if "maintainability" in normalized or "style" in normalized:
+            return {
+                "score": 90,
+                "issues": [
+                    {
+                        "location": "demo",
+                        "description": "Stubbed issue for maintainability.",
+                        "severity": "low",
+                    }
+                ],
+                "metrics": {"cyclomatic_complexity": {"demo": 1}},
+            }
+        if "summarize" in normalized or "recomm" in normalized:
+            return {
+                "executive_summary": "Stubbed report summary.",
+                "security_section": {"findings": ["Placeholder"], "count": 1},
+                "quality_section": {"score": 90, "issues": ["Placeholder issue"]},
+                "recommendations": [
+                    {
+                        "title": "Monitor findings",
+                        "priority": "medium",
+                        "detail": "Follow up on analyzer notes.",
+                    }
+                ],
+            }
+        return {
+            "executive_summary": "Fallback summary.",
+            "security_section": {"findings": [], "count": 0},
+            "quality_section": {"score": 100, "issues": []},
+            "recommendations": [],
+        }
+
     class FakeClient:
         def __init__(self, **config) -> None:
             self.config = dict(config)
@@ -71,13 +147,8 @@ def _provide_fake_async_openai(monkeypatch):
         async def _create(self, **kwargs) -> FakeChatResponse:
             model = kwargs.get("model", "stub-model")
             messages = kwargs.get("messages", [])
-            content = "ok"
-            if isinstance(messages, list) and messages:
-                message = messages[0]
-                if isinstance(message, dict):
-                    content = message.get("content", content)
-                else:
-                    content = getattr(message, "content", content)
+            system_prompt = _extract_system_prompt(messages)
+            content = json.dumps(_orchestration_llm_payload(system_prompt))
             return FakeChatResponse(content=content, model=model)
 
     monkeypatch.setattr(core_agents, "AsyncOpenAI", FakeClient, raising=False)
@@ -97,8 +168,8 @@ def test_readme_mentions_traces_live():
     text = Path("README.md").read_text(encoding="utf-8")
     assert "See traces live" in text
     assert "uv run python scripts/run_phoenix.py" in text
-    assert "uv run python -m src.orchestration.code_analysis" in text
-    assert "http://localhost:6006" in text
+    assert "uv run python -m orchestration.code_analysis" in text
+    assert "http://127.0.0.1:6006" in text or "http://localhost:6006" in text
 
 
 def test_run_phoenix_script_exists():
@@ -126,6 +197,7 @@ def test_init_observability_sets_up_tracing_and_traceloop(monkeypatch):
     monkeypatch.setattr(core_tracing.TracingManager, "setup", fake_setup)
     traceloop_calls: list[dict[str, bool]] = []
     _provide_fake_traceloop(monkeypatch, traceloop_calls)
+    monkeypatch.setenv("TRACELOOP_API_KEY", "test-key")
 
     module.init_observability(
         "orchestration-code-analysis", phoenix_endpoint="http://localhost:6006/v1/traces"
@@ -169,6 +241,7 @@ def test_init_observability_warns_when_traceloop_missing(monkeypatch, caplog):
         return object()
 
     monkeypatch.setattr(core_tracing.TracingManager, "setup", fake_setup)
+    monkeypatch.setenv("TRACELOOP_API_KEY", "test-key")
 
     original_import = builtins.__import__
 
