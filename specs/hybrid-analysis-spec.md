@@ -1,5 +1,7 @@
 # Spec: Hybrid — Project Analysis with Pattern Comparison
 
+> **Status: deferred to Milestone 2.** Spec retained for future execution; not in Milestone 1 scope.
+
 ## Goal
 
 Build a hybrid multi-agent system that combines orchestration between teams with choreography within teams, plus implement the **same code-review task in both pure orchestration and pure choreography** for direct side-by-side comparison.

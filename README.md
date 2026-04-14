@@ -103,7 +103,7 @@ template — see [docs/vertical-validation-runbook.md](docs/vertical-validation-
 | 3 | `choreography-research` | Event-driven multi-source research | Done |
 | — | `observability-phase1` | Phoenix + OpenLLMetry wiring (independent) | Done |
 | 4 | `vertical-validation` | Scaffolding (fixtures + CLI runner) for live runbook | Done |
-| 5 | `hybrid-analysis` | Hybrid pattern + comparison harness | Pending |
+| 5 | `hybrid-analysis` | Hybrid pattern + comparison harness | Deferred (Milestone 2) |
 
 ## Tech Stack
 

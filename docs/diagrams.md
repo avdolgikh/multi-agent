@@ -1,5 +1,109 @@
 # Architecture Diagrams
 
+## Orchestration — Sequential Code Analysis
+
+A central `CodeAnalysisOrchestrator` drives four agents through a fixed pipeline. Each step's output is snapshotted; on failure, a `SagaCoordinator` rolls back completed steps in reverse order. The pattern is *centralised control, explicit state machine, compensating transactions*.
+
+```
+                  Input file path
+                        │
+                        ▼
+        ┌──────────────────────────────────┐
+        │  CodeAnalysisOrchestrator         │
+        │  state: PENDING → ... → COMPLETED │
+        │  saga: snapshot after each step   │
+        └────────┬─────────────────────────┘
+                 │  run_step(step, agent)
+     ┌───────────┼───────────┬───────────┐
+     ▼           ▼           ▼           ▼
+  PARSING    SCANNING    CHECKING    REPORTING
+  Parser     Security    Quality     Report
+  Agent      Agent       Agent       Agent
+     │           │           │           │
+     └──── each: Agent.execute → Agent.llm span ────┘
+                        │
+                        ▼
+        On failure at step N:
+        SagaCoordinator.compensate(steps[:N])
+        → rollback in reverse order → ROLLED_BACK
+```
+
+```mermaid
+flowchart TD
+    INPUT["input_path"] --> ORCH["CodeAnalysisOrchestrator"]
+    ORCH -->|step 1| P["ParserAgent<br/>PARSING"]
+    P -->|ParseResult| S["SecurityAgent<br/>SCANNING"]
+    S -->|SecurityResult| Q["QualityAgent<br/>CHECKING"]
+    Q -->|QualityResult| R["ReportAgent<br/>REPORTING"]
+    R --> DONE["AnalysisReport<br/>status=completed"]
+    S -.failure.-> SAGA["SagaCoordinator<br/>compensate prior steps"]
+    Q -.failure.-> SAGA
+    R -.failure.-> SAGA
+    SAGA --> RB["status=rolled_back"]
+```
+
+Key property: a single trace per run. Phoenix shows the pipeline root, one `Agent.execute` span per step, and one `Agent.llm` child span per agent (13 spans total in a healthy run).
+
+## Choreography — Event-Driven Research Aggregation
+
+No orchestrator. `InitiatorAgent` publishes `ResearchRequested`; four search agents subscribe *independently* and each publish `FindingDiscovered` when they have something. `CrossReferenceAgent` reacts to findings. `AggregatorAgent` accumulates and emits `ResearchComplete` + `ResearchBrief`. The pattern is *decentralised reaction, shared event stream, no direct calls between agents*.
+
+```
+  InitiatorAgent                MessageBus                   EventStore
+       │                            │                            │
+       │  ResearchRequested ───────>│ ──────────────────────────>│ append
+       │                            │
+       │        ┌───────────────────┼───────────────────┐
+       │        │ fan-out subscribe │                   │
+       │        ▼                   ▼                   ▼
+       │   WebSearch           AcademicSearch       CodeAnalysis  + NewsSearch
+       │   Agent               Agent                Agent          Agent
+       │        │                   │                   │              │
+       │        │   each: .llm span + _summarize_entries               │
+       │        │   _build_finding_payload(summary=...)                │
+       │        │                   │                   │              │
+       │   FindingDiscovered   FindingDiscovered   FindingDiscovered  ...
+       │        │                   │                   │              │
+       │        └───────────────────┼───────────────────┘
+       │                            ▼
+       │                      CrossReferenceAgent
+       │                            │
+       │                       CrossReferenceFound
+       │                            │
+       │                            ▼
+       │                      AggregatorAgent
+       │                            │
+       │                     ResearchComplete + ResearchBrief
+       │
+       └──── DLQMonitorAgent watches for AgentError / dead-letter events ─────
+```
+
+```mermaid
+flowchart LR
+    INIT["InitiatorAgent"] -->|ResearchRequested| BUS((MessageBus))
+    BUS -.subscribe.-> W["WebSearchAgent"]
+    BUS -.subscribe.-> A["AcademicSearchAgent"]
+    BUS -.subscribe.-> C["CodeAnalysisAgent"]
+    BUS -.subscribe.-> N["NewsSearchAgent"]
+    W -->|FindingDiscovered| BUS
+    A -->|FindingDiscovered| BUS
+    C -->|FindingDiscovered| BUS
+    N -->|FindingDiscovered| BUS
+    BUS -.subscribe.-> X["CrossReferenceAgent"]
+    X -->|CrossReferenceFound| BUS
+    BUS -.subscribe.-> AGG["AggregatorAgent"]
+    AGG -->|ResearchComplete<br/>ResearchBrief| OUT["stdout / downstream"]
+    BUS -.error stream.-> DLQ["DLQMonitorAgent"]
+```
+
+Key property: one trace per agent (not per run), linked by the `trace_context` field on events. No agent holds a reference to another — the structural invariant is enforced by `test_initiator_agent_has_no_direct_references_to_other_agents`.
+
+---
+
+## Core Infrastructure Diagrams
+
+The diagrams below describe the shared plumbing that both patterns use — agents, bus, resilience, tracing.
+
 ## 1. How an Agent Talks to an LLM
 
 The core flow: any agent calls an LLM through a resilient, traced pipeline.

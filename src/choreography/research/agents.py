@@ -602,12 +602,13 @@ class AcademicSearchAgent(SearchAgent):
     ) -> dict[str, Any]:
         authors = [str(author) for author in entry.get("authors", [])] or ["Dr. Parallel"]
         year = int(entry.get("year") or datetime.now(timezone.utc).year)
-        abstract = entry.get("abstract") or entry.get("raw_content") or summary_text
+        abstract = entry.get("abstract") or entry.get("raw_content") or ""
+        summary = f"{summary_text} {abstract}".strip()
         url = entry.get("url", "https://doi.org/10.1000/choreo")
         relevance = round(max(0.7, 0.95 - 0.1 * rank), 2)
         return {
             "title": entry.get("title") or f"{topic} empirical study",
-            "summary": abstract,
+            "summary": summary,
             "url": url,
             "relevance_score": relevance,
             "raw_content": abstract,
@@ -641,7 +642,8 @@ class CodeAnalysisAgent(SearchAgent):
     ) -> dict[str, Any]:
         repository = entry.get("repository") or "https://github.com/example/reference"
         language = entry.get("language") or "python"
-        summary = entry.get("summary") or summary_text
+        source_summary = entry.get("summary") or entry.get("raw_content") or ""
+        summary = f"{summary_text} {source_summary}".strip()
         relevance = round(max(0.7, 0.9 - 0.1 * rank), 2)
         return {
             "title": entry.get("title") or f"{topic} reference implementation",
@@ -680,7 +682,8 @@ class NewsSearchAgent(SearchAgent):
         published = entry.get("published_date")
         if not isinstance(published, datetime):
             published = datetime.now(timezone.utc)
-        summary = entry.get("summary") or summary_text
+        source_summary = entry.get("summary") or entry.get("raw_content") or ""
+        summary = f"{summary_text} {source_summary}".strip()
         relevance = round(max(0.65, 0.9 - 0.1 * rank), 2)
         return {
             "title": entry.get("title") or f"{topic} news",
