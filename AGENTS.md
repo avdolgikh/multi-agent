@@ -118,9 +118,23 @@ Pipeline tool: `D:\dev\avdolgikh_github_repos\spec-driven-dev-pipeline`
 | 3 | `choreography-research` + `-llm-surface` | Event-driven research with surfaced LLM summaries | DONE |
 | 4 | `observability-phase1` | Phoenix + OpenLLMetry wiring | DONE |
 | 5 | `vertical-validation` | Scaffolding (fixtures + CLI runner) for live Ollama + Phoenix runbook | DONE |
-| 6 | `hybrid-analysis` | Hybrid pattern + comparison harness | **Deferred to Milestone 2** |
+
 
 > **`vertical-validation` is split**: the *spec* is pipeline-implementable scaffolding — fixtures + CLI runner, all externals mocked. The *runbook* (`docs/vertical-validation-runbook.md`) is manual — human runs Ollama + Phoenix, inspects traces.
+
+### Milestone 2: Hybrid Analysis (dependency chain)
+
+Master spec: `specs/hybrid-analysis-spec.md`
+
+| # | Task ID | Spec | Status |
+|---|---------|------|--------|
+| 6 | `hybrid-foundation` | Models + Team + ProjectOrchestrator state machine (stub agents) | TODO |
+| 7 | `hybrid-structure-team` | Discovery: Structure Team — 3 agents, intra-team choreography | TODO |
+| 8 | `hybrid-dependencies-team` | Discovery: Dependencies Team — 2 agents, concurrent execution | TODO |
+| 9 | `hybrid-deepdive-synthesis` | Deep Dive + Synthesis — full hybrid pipeline end-to-end | TODO |
+| 10 | `comparison-orchestrated-review` | Common models + orchestrated code review (4-agent pipeline) | TODO |
+| 11 | `comparison-choreographed-review` | Choreographed code review (3 reviewers + aggregator) | TODO |
+| 12 | `comparison-harness` | Comparison harness, metrics, CLI entry points | TODO |
 
 ### Pipeline Run Commands
 ```bash
