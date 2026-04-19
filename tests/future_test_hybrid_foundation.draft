@@ -1,0 +1,1745 @@
+from __future__ import annotations
+
+import asyncio
+import importlib
+import inspect
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any, Mapping
+
+import pytest
+from opentelemetry.sdk.trace.export import InMemorySpanExporter, SimpleSpanProcessor
+from pydantic import BaseModel
+
+from core.agents import AgentResult, AgentTask, BaseAgent
+from core.messaging import InMemoryBus, Message
+from core.state import Event, InMemoryEventStore, SnapshotStore
+from core.tracing import TracingManager, extract_context, inject_context
+
+
+def _load_hybrid_modules() -> SimpleNamespace:
+    module_names = {
+        "root": "hybrid",
+        "package": "hybrid.project_analysis",
+        "models": "hybrid.project_analysis.models",
+        "events": "hybrid.project_analysis.events",
+        "team": "hybrid.project_analysis.team",
+        "orchestrator": "hybrid.project_analysis.orchestrator",
+        "stubs": "hybrid.project_analysis.stubs",
+    }
+    loaded: dict[str, Any] = {}
+    try:
+        for key, module_name in module_names.items():
+            loaded[key] = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        pytest.fail(
+            "hybrid.project_analysis is not implemented yet; the hybrid foundation "
+            "spec requires this package and its public re-exports."
+        )
+    return SimpleNamespace(**loaded)
+
+
+def _find_public_member(module: Any, *keywords: str, kind: str = "any") -> tuple[str, Any]:
+    for name, value in vars(module).items():
+        lower = name.lower()
+        if not all(keyword.lower() in lower for keyword in keywords):
+            continue
+        if kind == "class" and not inspect.isclass(value):
+            continue
+        if kind == "callable" and not callable(value):
+            continue
+        if kind == "module" and not inspect.ismodule(value):
+            continue
+        return name, value
+    raise AssertionError(
+        f"Could not find a public {kind} in {module.__name__ if hasattr(module, '__name__') else module} "
+        f"matching keywords {keywords}"
+    )
+
+
+def _public_model_classes(module: Any) -> list[tuple[str, type[BaseModel]]]:
+    return [
+        (name, value)
+        for name, value in vars(module).items()
+        if not name.startswith("_") and inspect.isclass(value) and issubclass(value, BaseModel)
+    ]
+
+
+def _find_model_field(model_cls: type[BaseModel], *keywords: str) -> str:
+    for field_name in model_cls.model_fields:
+        lower = field_name.lower()
+        if all(keyword.lower() in lower for keyword in keywords):
+            return field_name
+    raise AssertionError(
+        f"Could not find a field on {model_cls.__name__} matching keywords {keywords}"
+    )
+
+
+def _find_model_field_any(model_cls: type[BaseModel], *keywords: str) -> str:
+    for field_name in model_cls.model_fields:
+        lower = field_name.lower()
+        if any(keyword.lower() in lower for keyword in keywords):
+            return field_name
+    raise AssertionError(
+        f"Could not find a field on {model_cls.__name__} matching any of {keywords}"
+    )
+
+
+def _public_method_names(cls: type[Any]) -> list[str]:
+    return [
+        name for name, value in vars(cls).items() if callable(value) and not name.startswith("_")
+    ]
+
+
+def _contains_value(value: Any, needle: str) -> bool:
+    needle = needle.lower()
+    if isinstance(value, BaseModel):
+        return _contains_value(value.model_dump(), needle)
+    if isinstance(value, Mapping):
+        return any(
+            _contains_value(key, needle) or _contains_value(item, needle)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_value(item, needle) for item in value)
+    return needle in str(value).lower()
+
+
+def _mapping_has_key_like(value: Any, *keywords: str) -> bool:
+    mapping = _normalize_mapping(value)
+    keys = [str(key).lower() for key in mapping]
+    return any(all(keyword.lower() in key for keyword in keywords) for key in keys)
+
+
+def _normalize_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    if hasattr(value, "output_data"):
+        output = getattr(value, "output_data")
+        if isinstance(output, Mapping):
+            return dict(output)
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    raise AssertionError(f"Expected a mapping-like result, got {type(value)!r}")
+
+
+def _mapping_value_by_key_keywords(value: Any, *keyword_groups: tuple[str, ...]) -> Any:
+    mapping = _normalize_mapping(value)
+    for keyword_group in keyword_groups:
+        for key, item in mapping.items():
+            lower = str(key).lower()
+            if all(keyword.lower() in lower for keyword in keyword_group):
+                return item
+    raise AssertionError(
+        f"Could not find a mapping value in keys {sorted(str(key) for key in mapping)} "
+        f"matching keyword groups {keyword_groups}"
+    )
+
+
+def _setup_tracing(service_name: str) -> tuple[Any, InMemorySpanExporter]:
+    provider = TracingManager.setup(service_name, endpoint=None)
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider, exporter
+
+
+def _make_message(
+    topic: str, payload: dict[str, Any], *, trace_context: dict[str, Any] | None = None
+) -> Message:
+    return Message(
+        message_id="message-id",
+        topic=topic,
+        payload=payload,
+        timestamp=datetime.now(timezone.utc),
+        trace_context=trace_context or {},
+        source_agent="test",
+    )
+
+
+def _sample_structure_payload() -> dict[str, Any]:
+    return {
+        "functions": [{"name": "compute", "params": ["value"]}],
+        "classes": [{"name": "Calculator"}],
+        "imports": ["math"],
+        "dependencies": {"math": "stdlib"},
+    }
+
+
+def _sample_dependency_payload() -> dict[str, Any]:
+    return {
+        "dependencies": {"requests": "2.31.0"},
+        "packages": [{"name": "requests", "version": "2.31.0"}],
+        "findings": [],
+    }
+
+
+def _sample_security_payload() -> dict[str, Any]:
+    return {
+        "findings": [
+            {
+                "severity": "medium",
+                "location": "module.py:10",
+                "description": "Potential secret usage",
+                "recommendation": "Move secrets to environment variables",
+            }
+        ]
+    }
+
+
+def _sample_quality_payload() -> dict[str, Any]:
+    return {
+        "score": 92,
+        "issues": [
+            {
+                "location": "module.py:1",
+                "description": "Missing docstring",
+                "severity": "low",
+            }
+        ],
+        "metrics": {"cyclomatic_complexity": {"compute": 2}},
+    }
+
+
+def _sample_project_report_payload() -> dict[str, Any]:
+    return {
+        "structure": _sample_structure_payload(),
+        "dependencies": _sample_dependency_payload(),
+        "security": _sample_security_payload(),
+        "quality": _sample_quality_payload(),
+        "summary": "All sections are present.",
+        "recommendations": [
+            {"title": "Add tests", "priority": "medium", "detail": "Cover edge cases"}
+        ],
+    }
+
+
+def _build_model_instance(model_cls: type[BaseModel], payload: dict[str, Any]) -> BaseModel:
+    return model_cls.model_validate(payload)
+
+
+def _phase_value(phase_module: Any, name: str) -> Any:
+    target = name.upper()
+    for candidate_name, candidate in vars(phase_module).items():
+        if candidate_name.startswith("_"):
+            continue
+        if candidate_name.upper() == target and isinstance(candidate, str):
+            return candidate
+        if hasattr(candidate, target):
+            return getattr(candidate, target)
+    return target
+
+
+def _build_with_semantics(callable_obj: Any, semantic_kwargs: dict[str, Any]) -> Any:
+    signature = inspect.signature(callable_obj)
+    param_names = list(signature.parameters)
+
+    keyword_map = {
+        "agent_id": ["agent_id", "agent", "id"],
+        "name": ["team_name", "name", "team"],
+        "model": ["model"],
+        "provider": ["provider"],
+        "canned_output": ["canned", "output", "payload", "result"],
+        "fail": ["fail", "failure", "error", "broken"],
+        "started": ["started"],
+        "release": ["release"],
+        "agents": ["agents", "members", "agent_list"],
+        "agent_pairs": ["pairs", "pair", "agent_pairs", "member_pairs", "members", "outputs"],
+        "bus": ["message_bus", "bus"],
+        "event_store": ["event_store", "events", "store"],
+        "aggregator": ["aggregator", "merge", "combine"],
+        "validator": ["validator", "validation", "phase_validator"],
+        "snapshot_store": ["snapshot_store", "snapshot", "snapshots"],
+        "tracer_provider": ["tracer_provider", "tracer", "provider"],
+        "teams": ["teams", "team_map", "discovery"],
+        "synthesis_agent": ["synthesis", "report_agent", "report"],
+        "expected_team_names": ["expected", "team_names"],
+        "discovery_team_names": ["discovery", "team_names"],
+        "deep_dive_team_names": ["deep", "team_names"],
+        "phase_validator": ["phase", "validator"],
+        "path": ["path", "input"],
+        "task": ["task"],
+        "input_data": ["input_data", "input", "payload", "data"],
+        "trace_context": ["trace_context", "context"],
+    }
+
+    kwargs: dict[str, Any] = {}
+    for semantic_name, value in semantic_kwargs.items():
+        keywords = keyword_map.get(semantic_name, [semantic_name])
+        chosen_param = None
+        for param_name in param_names:
+            lower = param_name.lower()
+            if any(keyword in lower for keyword in keywords):
+                chosen_param = param_name
+                break
+        if chosen_param is not None:
+            kwargs[chosen_param] = value
+    return callable_obj(**kwargs)
+
+
+def _find_coroutine_method(obj: Any, *keywords: str) -> tuple[str, Any]:
+    cls = obj if inspect.isclass(obj) else obj.__class__
+    for name, value in inspect.getmembers(cls):
+        if name.startswith("_") or not callable(value):
+            continue
+        lower = name.lower()
+        if all(keyword.lower() in lower for keyword in keywords) and inspect.iscoroutinefunction(
+            value
+        ):
+            bound = getattr(obj, name)
+            return name, bound
+    raise AssertionError(f"Could not find an async public method matching {keywords}")
+
+
+def _find_public_callable(obj: Any, *keywords: str) -> tuple[str, Any]:
+    cls = obj if inspect.isclass(obj) else obj.__class__
+    for name, value in inspect.getmembers(cls):
+        if name.startswith("_") or not callable(value):
+            continue
+        lower = name.lower()
+        if all(keyword.lower() in lower for keyword in keywords):
+            return name, getattr(obj, name)
+    raise AssertionError(f"Could not find a public callable matching {keywords}")
+
+
+def _find_model_by_payload(
+    module: Any,
+    payload: dict[str, Any],
+    *,
+    contains: tuple[str, ...] = (),
+    exclude_keywords: tuple[str, ...] = (),
+) -> tuple[str, type[BaseModel], BaseModel]:
+    for name, model_cls in _public_model_classes(module):
+        lower_name = name.lower()
+        if any(keyword.lower() in lower_name for keyword in exclude_keywords):
+            continue
+        try:
+            instance = model_cls.model_validate(payload)
+        except Exception:  # noqa: BLE001
+            continue
+        if all(_contains_value(instance, needle) for needle in contains):
+            return name, model_cls, instance
+    raise AssertionError(
+        f"Could not find a public model in {module.__name__ if hasattr(module, '__name__') else module} "
+        f"that validates payload keys {sorted(payload)}"
+    )
+
+
+def _find_model_by_field_specs(
+    module: Any,
+    field_specs: list[tuple[tuple[str, ...], Any]],
+    *,
+    contains: tuple[str, ...] = (),
+    exclude_keywords: tuple[str, ...] = (),
+) -> tuple[str, type[BaseModel], BaseModel]:
+    for name, model_cls in _public_model_classes(module):
+        lower_name = name.lower()
+        if any(keyword.lower() in lower_name for keyword in exclude_keywords):
+            continue
+        payload: dict[str, Any] = {}
+        for keywords, value in field_specs:
+            try:
+                field_name = _find_model_field_any(model_cls, *keywords)
+            except AssertionError:
+                break
+            payload[field_name] = value
+        else:
+            try:
+                instance = model_cls.model_validate(payload)
+            except Exception:  # noqa: BLE001
+                continue
+            if all(_contains_value(instance, needle) for needle in contains):
+                return name, model_cls, instance
+    raise AssertionError(
+        f"Could not find a public model in {module.__name__ if hasattr(module, '__name__') else module} "
+        f"matching field semantics {[keywords for keywords, _ in field_specs]}"
+    )
+
+
+def _find_phase_symbol(module: Any) -> tuple[str, Any]:
+    phase_names = {
+        "PENDING",
+        "DISCOVERY",
+        "DEEP_DIVE",
+        "SYNTHESIS",
+        "COMPLETED",
+        "ROLLING_BACK",
+        "FAILED",
+    }
+    for name, value in vars(module).items():
+        if name.startswith("_"):
+            continue
+        if inspect.isclass(value):
+            members = {candidate.upper() for candidate in dir(value) if candidate.isupper()}
+            if {"DISCOVERY", "DEEP_DIVE", "SYNTHESIS"}.issubset(members):
+                return name, value
+        if isinstance(value, str) and value.upper() in phase_names:
+            return name, value
+    raise AssertionError(
+        "Could not find a public phase symbol with discovery/deep-dive/synthesis values"
+    )
+
+
+def _extract_bool_field(model: Any) -> bool:
+    if isinstance(model, bool):
+        return model
+    if isinstance(model, BaseModel):
+        for field_name, field_info in model.model_fields.items():
+            lower = field_name.lower()
+            if any(token in lower for token in ("valid", "pass", "success", "ok")):
+                return bool(getattr(model, field_name))
+            annotation = getattr(field_info, "annotation", None)
+            if annotation is bool:
+                return bool(getattr(model, field_name))
+        dumped = model.model_dump()
+        for key, value in dumped.items():
+            if any(token in key.lower() for token in ("valid", "pass", "success", "ok")):
+                return bool(value)
+    raise AssertionError(f"Could not determine a boolean result from {model!r}")
+
+
+def _build_stub_agent(
+    stubs_module: Any,
+    *,
+    agent_id: str,
+    name: str,
+    canned_output: dict[str, Any],
+    fail: bool = False,
+) -> Any:
+    StubAgent = stubs_module.StubAgent
+    return _build_with_semantics(
+        StubAgent,
+        {
+            "agent_id": agent_id,
+            "name": name,
+            "model": "stub-model",
+            "provider": "ollama",
+            "canned_output": canned_output,
+            "fail": fail,
+        },
+    )
+
+
+class RecordingEventStore(InMemoryEventStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.appended: list[tuple[str, Event]] = []
+
+    async def append(self, stream: str, event: Event) -> int:
+        self.appended.append((stream, event))
+        return await super().append(stream, event)
+
+
+class RecordingBus(InMemoryBus):
+    def __init__(self) -> None:
+        super().__init__()
+        self.published: list[tuple[str, Message]] = []
+
+    async def publish(self, topic: str, message: Message) -> None:
+        self.published.append((topic, message))
+        await super().publish(topic, message)
+
+
+class BarrierStubAgent:
+    def __init__(
+        self,
+        wrapped_agent: Any,
+        *,
+        started: asyncio.Event,
+        release: asyncio.Event,
+        recorded_trace_contexts: list[dict[str, Any]],
+    ) -> None:
+        self.wrapped_agent = wrapped_agent
+        self.started = started
+        self.release = release
+        self.recorded_trace_contexts = recorded_trace_contexts
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.wrapped_agent, item)
+
+    async def execute(self, task: AgentTask) -> AgentResult:
+        self.recorded_trace_contexts.append(task.trace_context or {})
+        self.started.set()
+        await self.release.wait()
+        return await self.wrapped_agent.execute(task)
+
+
+class RecordingStubAgent(BaseAgent):
+    def __init__(self, wrapped_agent: Any) -> None:
+        super().__init__(
+            agent_id=getattr(wrapped_agent, "agent_id"),
+            name=getattr(wrapped_agent, "name"),
+            model=getattr(wrapped_agent, "model", "stub-model"),
+            provider=getattr(wrapped_agent, "provider", "ollama"),
+            tools=[],
+            system_prompt="",
+            base_url=None,
+        )
+        self.wrapped_agent = wrapped_agent
+        self.seen_tasks: list[AgentTask] = []
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.wrapped_agent, item)
+
+    async def execute(self, task: AgentTask) -> AgentResult:
+        self.seen_tasks.append(task)
+        return await self.wrapped_agent.execute(task)
+
+
+def _make_team(
+    team_module: Any,
+    *,
+    name: str,
+    agents: list[Any],
+    bus: Any,
+    event_store: Any,
+    aggregator: Any,
+    tracer_provider: Any | None = None,
+) -> Any:
+    Team = team_module.Team
+    return _build_with_semantics(
+        Team,
+        {
+            "name": name,
+            "agents": agents,
+            "bus": bus,
+            "event_store": event_store,
+            "aggregator": aggregator,
+            "tracer_provider": tracer_provider,
+        },
+    )
+
+
+def _make_stub_team(
+    root_module: Any,
+    *,
+    name: str,
+    agent_pairs: list[tuple[str, dict[str, Any]]],
+    bus: Any,
+    event_store: Any,
+    tracer_provider: Any | None = None,
+) -> Any:
+    make_stub_team = getattr(root_module, "make_stub_team")
+    return _build_with_semantics(
+        make_stub_team,
+        {
+            "name": name,
+            "agent_pairs": agent_pairs,
+            "bus": bus,
+            "event_store": event_store,
+            "tracer_provider": tracer_provider,
+        },
+    )
+
+
+def _make_validator(orchestrator_module: Any) -> Any:
+    _, Validator = _find_public_member(orchestrator_module, "validator", kind="class")
+    return _build_with_semantics(
+        Validator,
+        {
+            "expected_team_names": {
+                "DISCOVERY": {"structure", "dependencies"},
+                "DEEP_DIVE": {"security", "quality"},
+                "SYNTHESIS": set(),
+            },
+            "discovery_team_names": {"structure", "dependencies"},
+            "deep_dive_team_names": {"security", "quality"},
+        },
+    )
+
+
+def _make_orchestrator(
+    orchestrator_module: Any,
+    *,
+    discovery_structure_team: Any,
+    discovery_dependencies_team: Any,
+    deep_dive_security_team: Any,
+    deep_dive_quality_team: Any,
+    synthesis_agent: Any,
+    validator: Any,
+    event_store: Any,
+    snapshot_store: Any,
+    bus: Any,
+    tracer_provider: Any,
+) -> Any:
+    _, Orchestrator = _find_public_member(orchestrator_module, "orchestrator", kind="class")
+    return _build_with_semantics(
+        Orchestrator,
+        {
+            "teams": {
+                "DISCOVERY": {
+                    "structure": discovery_structure_team,
+                    "dependencies": discovery_dependencies_team,
+                },
+                "DEEP_DIVE": {
+                    "security": deep_dive_security_team,
+                    "quality": deep_dive_quality_team,
+                },
+            },
+            "structure_team": discovery_structure_team,
+            "dependencies_team": discovery_dependencies_team,
+            "security_team": deep_dive_security_team,
+            "quality_team": deep_dive_quality_team,
+            "synthesis_agent": synthesis_agent,
+            "validator": validator,
+            "phase_validator": validator,
+            "event_store": event_store,
+            "snapshot_store": snapshot_store,
+            "bus": bus,
+            "tracer_provider": tracer_provider,
+        },
+    )
+
+
+def _build_project_report(models_module: Any) -> BaseModel:
+    _, project_report_cls, project_report = _find_model_by_payload(
+        models_module,
+        _sample_project_report_payload(),
+        contains=("All sections are present.",),
+    )
+    assert issubclass(project_report_cls, BaseModel)
+    return project_report
+
+
+def _normalize_phase(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "name"):
+        return str(value.name)
+    return str(value)
+
+
+def _find_topic_helper(events_module: Any) -> tuple[str, Any]:
+    for name, value in vars(events_module).items():
+        if not callable(value) or name.startswith("_"):
+            continue
+        lower = name.lower()
+        if "topic" in lower:
+            return name, value
+    raise AssertionError("Expected an event topic helper in hybrid.project_analysis.events")
+
+
+def _find_phase_model(events_module: Any, *keywords: str) -> type[BaseModel]:
+    for name, value in vars(events_module).items():
+        if not inspect.isclass(value) or not issubclass(value, BaseModel):
+            continue
+        lower = name.lower()
+        if all(keyword.lower() in lower for keyword in keywords):
+            return value
+    raise AssertionError(f"Could not find an event model matching keywords {keywords}")
+
+
+def _collect_uppercase_string_constants(module: Any) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in vars(module).items()
+        if name.isupper() and isinstance(value, str)
+    }
+
+
+def _build_phase_model_instance(model_cls: type[BaseModel], *, extras: dict[str, Any]) -> BaseModel:
+    payload: dict[str, Any] = {}
+    for keyword, value in extras.items():
+        payload[_find_model_field(model_cls, keyword)] = value
+    return model_cls.model_validate(payload)
+
+
+def _build_structured_result_payload(key: str, value: Any) -> dict[str, Any]:
+    return {key: value}
+
+
+def _first_matching_span(spans: list[Any], *, attribute: str, value: str) -> Any:
+    for span in spans:
+        if span.attributes.get(attribute) == value:
+            return span
+    raise AssertionError(f"Could not find span with {attribute}={value!r}")
+
+
+def _children_of(span: Any, spans: list[Any]) -> list[Any]:
+    return [
+        candidate
+        for candidate in spans
+        if candidate.parent is not None and candidate.parent.span_id == span.context.span_id
+    ]
+
+
+def _span_containing_value(spans: list[Any], needle: str) -> Any:
+    for span in spans:
+        if _contains_value(span.attributes, needle):
+            return span
+    raise AssertionError(f"Could not find span containing value {needle!r}")
+
+
+def _phase_spans(spans: list[Any]) -> list[Any]:
+    return [
+        span for span in spans if "phase" in {str(key).lower() for key in span.attributes.keys()}
+    ]
+
+
+class _BaseBarrierAgent(BaseAgent):
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        name: str,
+        canned_output: dict[str, Any],
+        started: asyncio.Event,
+        release: asyncio.Event,
+        recorder: list[dict[str, Any]],
+        fail: bool = False,
+    ) -> None:
+        super().__init__(
+            agent_id=agent_id,
+            name=name,
+            model="stub-model",
+            provider="ollama",
+            tools=[],
+            system_prompt="",
+            base_url=None,
+        )
+        self._canned_output = canned_output
+        self._started = started
+        self._release = release
+        self._recorder = recorder
+        self._fail = fail
+
+    async def execute(self, task: AgentTask) -> AgentResult:
+        self._recorder.append(task.trace_context or {})
+        self._started.set()
+        await self._release.wait()
+        if self._fail:
+            return AgentResult(
+                task_id=task.task_id,
+                agent_id=self.agent_id,
+                output_data={},
+                status="failure",
+                error="forced failure",
+                duration_ms=0.0,
+                trace_context=task.trace_context or {},
+            )
+        return AgentResult(
+            task_id=task.task_id,
+            agent_id=self.agent_id,
+            output_data=dict(self._canned_output),
+            status="success",
+            error=None,
+            duration_ms=0.0,
+            trace_context=task.trace_context or {},
+        )
+
+
+@pytest.mark.asyncio
+async def test_public_api_reexports_from_package_root():
+    modules = _load_hybrid_modules()
+
+    discovered_symbols = [
+        _find_phase_symbol,
+        lambda module: _find_model_by_payload(
+            module, _sample_structure_payload(), contains=("compute",)
+        )[:2],
+        lambda module: _find_model_by_payload(
+            module, _sample_dependency_payload(), contains=("requests",)
+        )[:2],
+        lambda module: _find_model_by_payload(
+            module, _sample_security_payload(), contains=("secret",)
+        )[:2],
+        lambda module: _find_model_by_payload(
+            module, _sample_quality_payload(), contains=("cyclomatic_complexity",)
+        )[:2],
+        lambda module: _find_model_by_payload(
+            module, _sample_project_report_payload(), contains=("All sections are present.",)
+        )[:2],
+        lambda module: _find_model_by_field_specs(
+            module,
+            [
+                (("workflow", "workflow_id", "analysis", "run"), "workflow-1"),
+                (("phase", "state", "step"), "DISCOVERY"),
+                (
+                    ("result", "results", "output", "report", "data"),
+                    {"structure": _sample_structure_payload()},
+                ),
+            ],
+        )[:2],
+        lambda module: _find_model_by_field_specs(
+            module,
+            [
+                (("valid", "passed", "success", "ok", "approved"), True),
+                (("error", "errors", "issues", "problem", "message"), []),
+            ],
+        )[:2],
+        lambda module: _find_public_member(module, "team", kind="class"),
+        lambda module: _find_public_member(module, "orchestrator", kind="class"),
+        lambda module: _find_public_member(module, "phase", "validator", kind="class"),
+        lambda module: _find_public_member(module, "stub", "agent", kind="class"),
+        lambda module: _find_public_member(module, "stub", "team", kind="callable"),
+    ]
+
+    for finder in discovered_symbols:
+        package_name, package_value = finder(modules.package)
+        assert getattr(modules.root, package_name) is package_value
+
+
+def test_domain_models_are_pydantic_data_containers():
+    modules = _load_hybrid_modules()
+    models = modules.models
+
+    for _, model_cls in (
+        _find_model_by_payload(models, _sample_structure_payload(), contains=("compute",))[:2],
+        _find_model_by_payload(models, _sample_dependency_payload(), contains=("requests",))[:2],
+        _find_model_by_payload(models, _sample_security_payload(), contains=("secret",))[:2],
+        _find_model_by_payload(
+            models, _sample_quality_payload(), contains=("cyclomatic_complexity",)
+        )[:2],
+        _find_model_by_payload(
+            models, _sample_project_report_payload(), contains=("All sections are present.",)
+        )[:2],
+        _find_model_by_field_specs(
+            models,
+            [
+                (("workflow", "workflow_id", "analysis", "run"), "workflow-1"),
+                (("phase", "state", "step"), "DISCOVERY"),
+                (
+                    ("result", "results", "output", "report", "data"),
+                    {"structure": _sample_structure_payload()},
+                ),
+            ],
+            contains=("workflow-1", "discovery"),
+        )[:2],
+        _find_model_by_field_specs(
+            models,
+            [
+                (("valid", "passed", "success", "ok", "approved"), True),
+                (("error", "errors", "issues", "problem", "message"), []),
+            ],
+        )[:2],
+    ):
+        assert inspect.isclass(model_cls)
+        assert issubclass(model_cls, BaseModel)
+        assert _public_method_names(model_cls) == []
+
+    structure_cls = _find_model_by_payload(
+        models, _sample_structure_payload(), contains=("compute",)
+    )[1]
+    dependency_cls = _find_model_by_payload(
+        models, _sample_dependency_payload(), contains=("requests",)
+    )[1]
+    security_cls = _find_model_by_payload(models, _sample_security_payload(), contains=("secret",))[
+        1
+    ]
+    quality_cls = _find_model_by_payload(
+        models, _sample_quality_payload(), contains=("cyclomatic_complexity",)
+    )[1]
+    project_report_cls = _find_model_by_payload(
+        models, _sample_project_report_payload(), contains=("All sections are present.",)
+    )[1]
+
+    structure = _build_model_instance(structure_cls, _sample_structure_payload())
+    dependency = _build_model_instance(dependency_cls, _sample_dependency_payload())
+    security = _build_model_instance(security_cls, _sample_security_payload())
+    quality = _build_model_instance(quality_cls, _sample_quality_payload())
+    project_report = _build_model_instance(project_report_cls, _sample_project_report_payload())
+
+    assert _contains_value(structure, "compute")
+    assert _contains_value(dependency, "requests")
+    assert _contains_value(security, "secret")
+    assert _contains_value(quality, "cyclomatic_complexity")
+    assert _contains_value(project_report, "All sections are present.")
+
+    _, _analysis_state_cls, state = _find_model_by_field_specs(
+        models,
+        [
+            (("workflow", "workflow_id", "analysis", "run"), "workflow-1"),
+            (("phase", "state", "step"), "DISCOVERY"),
+            (
+                ("result", "results", "output", "report", "data"),
+                {"structure": _sample_structure_payload()},
+            ),
+        ],
+        contains=("workflow-1", "discovery"),
+    )
+    assert _contains_value(state, "workflow-1")
+    assert _contains_value(state, "discovery")
+
+    _, _validation_cls, validation_result = _find_model_by_field_specs(
+        models,
+        [
+            (("valid", "passed", "success", "ok", "approved"), True),
+            (("error", "errors", "issues", "problem", "message"), []),
+        ],
+    )
+    assert _extract_bool_field(validation_result) is True
+
+    _, result_model_cls, phase_result = _find_model_by_field_specs(
+        models,
+        [
+            (("phase", "state", "step"), "DISCOVERY"),
+            (
+                ("result", "results", "output", "report", "data"),
+                _sample_structure_payload(),
+            ),
+        ],
+        contains=("DISCOVERY", "compute"),
+        exclude_keywords=("validation",),
+    )
+    assert _public_method_names(result_model_cls) == []
+
+    assert _contains_value(phase_result, "DISCOVERY")
+    assert _contains_value(phase_result, "compute")
+
+
+def test_event_vocab_exposes_topic_helper_and_payload_models():
+    modules = _load_hybrid_modules()
+    events = modules.events
+
+    topic_helper_name, topic_helper = _find_topic_helper(events)
+    assert callable(topic_helper)
+
+    topic = topic_helper("structure", "completed")
+    assert isinstance(topic, str)
+    assert "structure" in topic.lower()
+    assert "completed" in topic.lower()
+    assert topic_helper_name.lower().endswith("topic") or "topic" in topic_helper_name.lower()
+
+    team_completed_cls = _find_phase_model(events, "team", "complete")
+    phase_validated_cls = _find_phase_model(events, "phase", "valid")
+    phase_failed_cls = _find_phase_model(events, "phase", "fail")
+
+    assert issubclass(team_completed_cls, BaseModel)
+    assert issubclass(phase_validated_cls, BaseModel)
+    assert issubclass(phase_failed_cls, BaseModel)
+
+    team_fields = {name.lower() for name in team_completed_cls.model_fields}
+    validated_fields = {name.lower() for name in phase_validated_cls.model_fields}
+    failed_fields = {name.lower() for name in phase_failed_cls.model_fields}
+
+    assert any("team" in name for name in team_fields)
+    assert any("phase" in name for name in validated_fields)
+    assert any("next" in name for name in validated_fields)
+    assert any("phase" in name for name in failed_fields)
+    assert any("rollback" in name or "compens" in name for name in failed_fields)
+
+    constants = _collect_uppercase_string_constants(events)
+    assert len(constants) >= 3
+    assert any(
+        "team" in value.lower() and "complete" in value.lower() for value in constants.values()
+    )
+    assert any(
+        "phase" in value.lower() and "valid" in value.lower() for value in constants.values()
+    )
+    assert any("phase" in value.lower() and "fail" in value.lower() for value in constants.values())
+
+
+@pytest.mark.asyncio
+async def test_make_stub_team_builds_merging_team_from_agent_pairs():
+    modules = _load_hybrid_modules()
+    provider, _exporter = _setup_tracing("hybrid-make-stub-team-tests")
+    bus = RecordingBus()
+    event_store = RecordingEventStore()
+
+    make_stub_team = getattr(modules.root, "make_stub_team")
+    team = _build_with_semantics(
+        make_stub_team,
+        {
+            "name": "structure",
+            "agent_pairs": [
+                ("structure-agent", {"structure": {"marker": "one"}}),
+                ("dependencies-agent", {"dependencies": {"marker": "two"}}),
+            ],
+            "bus": bus,
+            "event_store": event_store,
+            "tracer_provider": provider,
+        },
+    )
+
+    _entry_name, team_run = _find_coroutine_method(team, "run", "execute")
+    run_args: dict[str, Any] = {}
+    if "task" in inspect.signature(team_run).parameters:
+        run_args["task"] = AgentTask(
+            task_id="make-stub-team-task",
+            input_data={},
+            metadata={},
+            trace_context=inject_context(),
+        )
+    else:
+        run_args["input_data"] = {}
+        run_args["trace_context"] = inject_context()
+
+    result = await asyncio.wait_for(team_run(**run_args), timeout=1.0)
+
+    merged = _normalize_mapping(result)
+    assert merged["structure"]["marker"] == "one"
+    assert merged["dependencies"]["marker"] == "two"
+    assert len(event_store.appended) == 2
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "team" in topic.lower() and "complete" in topic.lower()
+            ]
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase_validator_is_async_and_enforces_phase_requirements():
+    modules = _load_hybrid_modules()
+    validator = _make_validator(modules.orchestrator)
+
+    assert inspect.iscoroutinefunction(validator.validate)
+
+    discovery_phase = _phase_value(modules.orchestrator, "DISCOVERY")
+    deep_dive_phase = _phase_value(modules.orchestrator, "DEEP_DIVE")
+    synthesis_phase = _phase_value(modules.orchestrator, "SYNTHESIS")
+
+    missing_discovery = {
+        "structure": _sample_structure_payload(),
+    }
+    valid_discovery = {
+        "structure": _sample_structure_payload(),
+        "dependencies": _sample_dependency_payload(),
+    }
+    invalid_synthesis = {
+        "structure": _sample_structure_payload(),
+        "dependencies": _sample_dependency_payload(),
+        "security": _sample_security_payload(),
+        "quality": _sample_quality_payload(),
+        "summary": "",
+    }
+    valid_synthesis = _sample_project_report_payload()
+
+    discovery_missing_result = await validator.validate(discovery_phase, missing_discovery)
+    discovery_valid_result = await validator.validate(discovery_phase, valid_discovery)
+    deep_dive_valid_result = await validator.validate(
+        deep_dive_phase,
+        {
+            "security": _sample_security_payload(),
+            "quality": _sample_quality_payload(),
+        },
+    )
+    synthesis_invalid_result = await validator.validate(synthesis_phase, invalid_synthesis)
+    synthesis_valid_result = await validator.validate(synthesis_phase, valid_synthesis)
+
+    assert _extract_bool_field(discovery_missing_result) is False
+    assert _extract_bool_field(discovery_valid_result) is True
+    assert _extract_bool_field(deep_dive_valid_result) is True
+    assert _extract_bool_field(synthesis_invalid_result) is False
+    assert _extract_bool_field(synthesis_valid_result) is True
+
+
+@pytest.mark.asyncio
+async def test_stub_agent_returns_canned_output_without_llm_call_and_spans_execute(monkeypatch):
+    modules = _load_hybrid_modules()
+    provider, exporter = _setup_tracing("hybrid-stub-agent-tests")
+
+    called_llm = False
+
+    async def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        nonlocal called_llm
+        called_llm = True
+        raise AssertionError("StubAgent must not call the LLM")
+
+    monkeypatch.setattr(BaseAgent, "call_llm", _fail_if_called)
+
+    agent = _build_stub_agent(
+        modules.stubs,
+        agent_id="stub-1",
+        name="Stub Agent",
+        canned_output={"result": "ok"},
+    )
+
+    with provider.get_tracer("hybrid.tests").start_as_current_span("parent") as parent_span:
+        task = AgentTask(
+            task_id="task-1",
+            input_data={"prompt": "ignored"},
+            metadata={},
+            trace_context=inject_context(),
+        )
+        result = await agent.execute(task)
+
+    provider.force_flush()
+    spans = exporter.get_finished_spans()
+    assert called_llm is False
+    assert result.status == "success"
+    assert result.output_data == {"result": "ok"}
+
+    parent_trace_id = parent_span.get_span_context().trace_id
+    child_spans = [
+        span
+        for span in spans
+        if span.parent is not None
+        and span.parent.trace_id == parent_trace_id
+        and span.parent.span_id == parent_span.get_span_context().span_id
+    ]
+    assert child_spans
+    assert any("execute" in span.name.lower() for span in child_spans)
+
+    failing_agent = _build_stub_agent(
+        modules.stubs,
+        agent_id="stub-fail",
+        name="Failing Stub Agent",
+        canned_output={"result": "ignored"},
+        fail=True,
+    )
+    failure_result = await failing_agent.execute(
+        AgentTask(
+            task_id="task-2",
+            input_data={},
+            metadata={},
+            trace_context={},
+        )
+    )
+    assert failure_result.status == "failure"
+    assert failure_result.error
+
+
+@pytest.mark.asyncio
+async def test_team_runs_member_agents_concurrently_publishes_completion_and_propagates_trace_context():
+    modules = _load_hybrid_modules()
+    provider, exporter = _setup_tracing("hybrid-team-tests")
+    bus = RecordingBus()
+    event_store = RecordingEventStore()
+    started_one = asyncio.Event()
+    started_two = asyncio.Event()
+    release = asyncio.Event()
+    trace_contexts_one: list[dict[str, Any]] = []
+    trace_contexts_two: list[dict[str, Any]] = []
+
+    agent_one = _BaseBarrierAgent(
+        agent_id="structure-1",
+        name="Structure One",
+        canned_output={"structure": {"marker": "one"}},
+        started=started_one,
+        release=release,
+        recorder=trace_contexts_one,
+    )
+    agent_two = _BaseBarrierAgent(
+        agent_id="structure-2",
+        name="Structure Two",
+        canned_output={"dependencies": {"marker": "two"}},
+        started=started_two,
+        release=release,
+        recorder=trace_contexts_two,
+    )
+
+    team = _make_team(
+        modules.team,
+        name="structure",
+        agents=[agent_one, agent_two],
+        bus=bus,
+        event_store=event_store,
+        aggregator=lambda outputs: {
+            key: value for output in outputs for key, value in output.items()
+        },
+        tracer_provider=provider,
+    )
+
+    _entry_name, team_run = _find_coroutine_method(team, "run", "execute")
+    task = AgentTask(
+        task_id="team-task",
+        input_data={"input_path": "demo.py"},
+        metadata={},
+        trace_context={},
+    )
+
+    with provider.get_tracer("hybrid.tests").start_as_current_span("team-parent") as parent_span:
+        task.trace_context = inject_context()
+        run_task = asyncio.create_task(
+            team_run(task=task)
+            if "task" in inspect.signature(team_run).parameters
+            else team_run(input_data=task.input_data, trace_context=task.trace_context)
+        )
+        await asyncio.wait_for(started_one.wait(), timeout=1.0)
+        await asyncio.wait_for(started_two.wait(), timeout=1.0)
+        release.set()
+        result = await asyncio.wait_for(run_task, timeout=1.0)
+
+    provider.force_flush()
+    spans = exporter.get_finished_spans()
+    merged = _normalize_mapping(result)
+
+    assert merged["structure"]["marker"] == "one"
+    assert merged["dependencies"]["marker"] == "two"
+    assert len(event_store.appended) == 2
+    assert all("structure" in stream.lower() for stream, _ in event_store.appended)
+    assert bus.published
+    assert any(
+        "structure" in topic.lower()
+        and ("complete" in topic.lower() or "completed" in topic.lower())
+        for topic, _ in bus.published
+    )
+    assert len(trace_contexts_one) == 1
+    assert len(trace_contexts_two) == 1
+    assert (
+        extract_context(trace_contexts_one[0]).trace_id == parent_span.get_span_context().trace_id
+    )
+    assert (
+        extract_context(trace_contexts_two[0]).trace_id == parent_span.get_span_context().trace_id
+    )
+
+    team_spans = [
+        span
+        for span in spans
+        if span.parent is not None
+        and span.parent.span_id == parent_span.get_span_context().span_id
+        and _children_of(span, spans)
+    ]
+    assert team_spans
+    team_span = team_spans[0]
+    assert team_span.parent is not None
+    assert team_span.parent.trace_id == parent_span.get_span_context().trace_id
+    assert any("execute" in child.name.lower() for child in _children_of(team_span, spans))
+
+
+@pytest.mark.asyncio
+async def test_team_failure_surfaces_on_completion_message_without_raising():
+    modules = _load_hybrid_modules()
+    provider, _exporter = _setup_tracing("hybrid-team-failure-tests")
+    bus = RecordingBus()
+    event_store = RecordingEventStore()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    trace_contexts: list[dict[str, Any]] = []
+
+    success_agent = _BaseBarrierAgent(
+        agent_id="security-1",
+        name="Security One",
+        canned_output={"security": {"marker": "ok"}},
+        started=started,
+        release=release,
+        recorder=trace_contexts,
+    )
+    failure_agent = _BaseBarrierAgent(
+        agent_id="security-2",
+        name="Security Two",
+        canned_output={},
+        started=asyncio.Event(),
+        release=release,
+        recorder=trace_contexts,
+        fail=True,
+    )
+
+    team = _make_team(
+        modules.team,
+        name="security",
+        agents=[success_agent, failure_agent],
+        bus=bus,
+        event_store=event_store,
+        aggregator=lambda outputs: {
+            key: value for output in outputs for key, value in output.items()
+        },
+        tracer_provider=provider,
+    )
+
+    _entry_name, team_run = _find_coroutine_method(team, "run", "execute")
+    run_args: dict[str, Any] = {}
+    if "task" in inspect.signature(team_run).parameters:
+        run_args["task"] = AgentTask(
+            task_id="team-failure-task",
+            input_data={},
+            metadata={},
+            trace_context=inject_context(),
+        )
+    else:
+        run_args["input_data"] = {}
+        run_args["trace_context"] = inject_context()
+
+    run_task = asyncio.create_task(team_run(**run_args))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    release.set()
+    result = await asyncio.wait_for(run_task, timeout=1.0)
+
+    merged = _normalize_mapping(result)
+    assert merged["security"]["marker"] == "ok"
+    assert len(event_store.appended) == 2
+    assert bus.published
+    completion_payload = bus.published[-1][1].payload
+    assert _contains_value(completion_payload, "failure") or _contains_value(
+        completion_payload, "boom"
+    )
+    assert _contains_value(completion_payload, "security")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_state_machine_happy_path_snapshots_and_trace_hierarchy(tmp_path):
+    modules = _load_hybrid_modules()
+    provider, exporter = _setup_tracing("hybrid-orchestrator-tests")
+    bus = RecordingBus()
+    event_store = RecordingEventStore()
+    snapshot_store = SnapshotStore()
+
+    discovery_structure_team = _make_stub_team(
+        modules.root,
+        name="structure",
+        agent_pairs=[("structure-agent", {"structure": _sample_structure_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+    discovery_dependencies_team = _make_stub_team(
+        modules.root,
+        name="dependencies",
+        agent_pairs=[("dependencies-agent", {"dependencies": _sample_dependency_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+    deep_dive_security_team = _make_stub_team(
+        modules.root,
+        name="security",
+        agent_pairs=[("security-agent", {"security": _sample_security_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+    deep_dive_quality_team = _make_stub_team(
+        modules.root,
+        name="quality",
+        agent_pairs=[("quality-agent", {"quality": _sample_quality_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+
+    report_model = _build_project_report(modules.models)
+    synthesis_agent = RecordingStubAgent(
+        _build_stub_agent(
+            modules.stubs,
+            agent_id="report-agent",
+            name="Report Agent",
+            canned_output=report_model.model_dump(),
+        )
+    )
+
+    orchestrator = _make_orchestrator(
+        modules.orchestrator,
+        discovery_structure_team=discovery_structure_team,
+        discovery_dependencies_team=discovery_dependencies_team,
+        deep_dive_security_team=deep_dive_security_team,
+        deep_dive_quality_team=deep_dive_quality_team,
+        synthesis_agent=synthesis_agent,
+        validator=_make_validator(modules.orchestrator),
+        event_store=event_store,
+        snapshot_store=snapshot_store,
+        bus=bus,
+        tracer_provider=provider,
+    )
+
+    path = tmp_path / "demo.py"
+    path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+
+    run_task = asyncio.create_task(orchestrator.run(str(path)))
+
+    report = await asyncio.wait_for(run_task, timeout=1.0)
+    provider.force_flush()
+
+    assert isinstance(report, BaseModel)
+    assert _contains_value(report, "All sections are present.")
+
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "team" in topic.lower() and "complete" in topic.lower()
+            ]
+        )
+        == 4
+    )
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "phase" in topic.lower() and "valid" in topic.lower()
+            ]
+        )
+        == 3
+    )
+    validated_payloads = [
+        _normalize_mapping(message.payload)
+        for topic, message in bus.published
+        if "phase" in topic.lower() and "valid" in topic.lower()
+    ]
+    assert len(validated_payloads) == 3
+    assert any(
+        _contains_value(payload, "discovery") and _contains_value(payload, "deep_dive")
+        for payload in validated_payloads
+    )
+    assert any(
+        _contains_value(payload, "deep_dive") and _contains_value(payload, "synthesis")
+        for payload in validated_payloads
+    )
+    assert any(
+        _contains_value(payload, "synthesis") and _contains_value(payload, "completed")
+        for payload in validated_payloads
+    )
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "phase" in topic.lower() and "fail" in topic.lower()
+            ]
+        )
+        == 0
+    )
+
+    analysis_state = getattr(orchestrator, "analysis_state")
+    assert analysis_state is not None
+    assert _contains_value(analysis_state, "completed")
+
+    history = await snapshot_store.history(
+        getattr(
+            analysis_state,
+            "workflow_id",
+            next(iter(getattr(snapshot_store, "_workflow_index", {})), ""),
+        )
+    )
+    assert history
+    history_phases = [
+        _normalize_phase(
+            _mapping_value_by_key_keywords(
+                snapshot.state,
+                ("phase",),
+                ("status",),
+                ("state",),
+                ("step",),
+            )
+        ).lower()
+        for snapshot in history
+    ]
+    assert "discovery" in history_phases
+    assert "deep_dive" in history_phases
+    assert "synthesis" in history_phases
+    assert history_phases.index("discovery") < history_phases.index("deep_dive")
+    assert history_phases.index("deep_dive") < history_phases.index("synthesis")
+
+    assert len(synthesis_agent.seen_tasks) == 1
+    synthesis_input = synthesis_agent.seen_tasks[0].input_data
+    assert _contains_value(synthesis_input, "structure")
+    assert _contains_value(synthesis_input, "dependencies")
+    assert _contains_value(synthesis_input, "security")
+    assert _contains_value(synthesis_input, "quality")
+
+    spans = exporter.get_finished_spans()
+    root_spans = [span for span in spans if span.parent is None]
+    assert root_spans
+    root_span = root_spans[0]
+
+    phase_spans = _children_of(root_span, spans)
+    assert len(phase_spans) == 3
+
+    phases_with_team_children = [
+        phase
+        for phase in phase_spans
+        if any(_children_of(child, spans) for child in _children_of(phase, spans))
+    ]
+    assert len(phases_with_team_children) == 2
+
+    for phase in phases_with_team_children:
+        team_spans = [child for child in _children_of(phase, spans) if _children_of(child, spans)]
+        assert team_spans
+        for team_span in team_spans:
+            assert any("execute" in child.name.lower() for child in _children_of(team_span, spans))
+
+    synthesis_phase_spans = [
+        phase
+        for phase in phase_spans
+        if any("execute" in child.name.lower() for child in _children_of(phase, spans))
+        and not any(_children_of(child, spans) for child in _children_of(phase, spans))
+    ]
+    assert len(synthesis_phase_spans) == 1
+    synthesis_children = _children_of(synthesis_phase_spans[0], spans)
+    assert any("execute" in child.name.lower() for child in synthesis_children)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_invalid_transition_raises_via_public_state(tmp_path):
+    modules = _load_hybrid_modules()
+    provider, _exporter = _setup_tracing("hybrid-transition-tests")
+    bus = RecordingBus()
+    event_store = RecordingEventStore()
+    snapshot_store = SnapshotStore()
+
+    discovery_structure_team = _make_stub_team(
+        modules.root,
+        name="structure",
+        agent_pairs=[("structure-agent", {"structure": _sample_structure_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+    discovery_dependencies_team = _make_stub_team(
+        modules.root,
+        name="dependencies",
+        agent_pairs=[("dependencies-agent", {"dependencies": _sample_dependency_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+    deep_dive_security_team = _make_stub_team(
+        modules.root,
+        name="security",
+        agent_pairs=[("security-agent", {"security": _sample_security_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+    deep_dive_quality_team = _make_stub_team(
+        modules.root,
+        name="quality",
+        agent_pairs=[("quality-agent", {"quality": _sample_quality_payload()})],
+        bus=bus,
+        event_store=event_store,
+        tracer_provider=provider,
+    )
+
+    report_model = _build_project_report(modules.models)
+    synthesis_agent = RecordingStubAgent(
+        _build_stub_agent(
+            modules.stubs,
+            agent_id="report-agent",
+            name="Report Agent",
+            canned_output=report_model.model_dump(),
+        )
+    )
+
+    orchestrator = _make_orchestrator(
+        modules.orchestrator,
+        discovery_structure_team=discovery_structure_team,
+        discovery_dependencies_team=discovery_dependencies_team,
+        deep_dive_security_team=deep_dive_security_team,
+        deep_dive_quality_team=deep_dive_quality_team,
+        synthesis_agent=synthesis_agent,
+        validator=_make_validator(modules.orchestrator),
+        event_store=event_store,
+        snapshot_store=snapshot_store,
+        bus=bus,
+        tracer_provider=provider,
+    )
+
+    path = tmp_path / "invalid-transition.py"
+    path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+
+    await orchestrator.run(str(path))
+
+    try:
+        _, transition = _find_public_callable(orchestrator, "transition")
+    except AssertionError:
+        _, transition = _find_public_callable(orchestrator, "advance")
+
+    invalid_target = _phase_value(modules.orchestrator, "DISCOVERY")
+    completed_state = _phase_value(modules.orchestrator, "COMPLETED")
+    signature = inspect.signature(transition)
+    call_args: list[Any] = []
+    call_kwargs: dict[str, Any] = {}
+    for parameter in signature.parameters.values():
+        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        lower = parameter.name.lower()
+        value = (
+            completed_state
+            if any(token in lower for token in ("from", "current", "source", "before"))
+            else invalid_target
+        )
+        if parameter.kind == inspect.Parameter.KEYWORD_ONLY:
+            call_kwargs[parameter.name] = value
+        else:
+            call_args.append(value)
+
+    with pytest.raises(Exception) as excinfo:
+        outcome = transition(*call_args, **call_kwargs)
+        if inspect.isawaitable(outcome):
+            await outcome
+    message = str(excinfo.value).strip().lower()
+    assert message
+    assert "completed" in message and "discovery" in message
+    assert "transition" in message or "invalid" in message or "cannot" in message
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_validation_failure_rolls_back_and_preserves_prior_results(tmp_path):
+    modules = _load_hybrid_modules()
+    provider, _exporter = _setup_tracing("hybrid-orchestrator-failure-tests")
+    bus = RecordingBus()
+    event_store = RecordingEventStore()
+    snapshot_store = SnapshotStore()
+
+    discovery_release = asyncio.Event()
+    deep_dive_release = asyncio.Event()
+    started_discovery = asyncio.Event()
+    started_dependencies = asyncio.Event()
+    started_security = asyncio.Event()
+    started_quality = asyncio.Event()
+
+    discovery_structure_agent = _BaseBarrierAgent(
+        agent_id="structure-agent",
+        name="Structure Agent",
+        canned_output={"structure": {"marker": "kept"}},
+        started=started_discovery,
+        release=discovery_release,
+        recorder=[],
+    )
+    discovery_dependencies_agent = _BaseBarrierAgent(
+        agent_id="dependencies-agent",
+        name="Dependencies Agent",
+        canned_output={"dependencies": {"marker": "kept"}},
+        started=started_dependencies,
+        release=discovery_release,
+        recorder=[],
+    )
+    deep_dive_security_agent = _BaseBarrierAgent(
+        agent_id="security-agent",
+        name="Security Agent",
+        canned_output={"security": {"marker": "kept"}},
+        started=started_security,
+        release=deep_dive_release,
+        recorder=[],
+    )
+    deep_dive_quality_agent = _BaseBarrierAgent(
+        agent_id="quality-agent",
+        name="Quality Agent",
+        canned_output={"quality": {"marker": "kept"}},
+        started=started_quality,
+        release=deep_dive_release,
+        recorder=[],
+    )
+
+    discovery_structure_team = _make_team(
+        modules.team,
+        name="structure",
+        agents=[discovery_structure_agent],
+        bus=bus,
+        event_store=event_store,
+        aggregator=lambda outputs: {
+            key: value for output in outputs for key, value in output.items()
+        },
+        tracer_provider=provider,
+    )
+    discovery_dependencies_team = _make_team(
+        modules.team,
+        name="dependencies",
+        agents=[discovery_dependencies_agent],
+        bus=bus,
+        event_store=event_store,
+        aggregator=lambda outputs: {
+            key: value for output in outputs for key, value in output.items()
+        },
+        tracer_provider=provider,
+    )
+    deep_dive_security_team = _make_team(
+        modules.team,
+        name="security",
+        agents=[deep_dive_security_agent],
+        bus=bus,
+        event_store=event_store,
+        aggregator=lambda outputs: {
+            key: value for output in outputs for key, value in output.items()
+        },
+        tracer_provider=provider,
+    )
+    deep_dive_quality_team = _make_team(
+        modules.team,
+        name="quality",
+        agents=[deep_dive_quality_agent],
+        bus=bus,
+        event_store=event_store,
+        aggregator=lambda outputs: {
+            key: value for output in outputs for key, value in output.items()
+        },
+        tracer_provider=provider,
+    )
+
+    synthesis_report_payload = _sample_project_report_payload()
+    synthesis_report_payload["summary"] = ""
+    failing_synthesis = RecordingStubAgent(
+        _build_stub_agent(
+            modules.stubs,
+            agent_id="report-agent",
+            name="Report Agent",
+            canned_output=synthesis_report_payload,
+        )
+    )
+
+    orchestrator = _make_orchestrator(
+        modules.orchestrator,
+        discovery_structure_team=discovery_structure_team,
+        discovery_dependencies_team=discovery_dependencies_team,
+        deep_dive_security_team=deep_dive_security_team,
+        deep_dive_quality_team=deep_dive_quality_team,
+        synthesis_agent=failing_synthesis,
+        validator=_make_validator(modules.orchestrator),
+        event_store=event_store,
+        snapshot_store=snapshot_store,
+        bus=bus,
+        tracer_provider=provider,
+    )
+
+    path = tmp_path / "failing.py"
+    path.write_text("def demo():\n    return 1\n", encoding="utf-8")
+
+    run_task = asyncio.create_task(orchestrator.run(str(path)))
+    await asyncio.wait_for(started_discovery.wait(), timeout=1.0)
+    await asyncio.wait_for(started_dependencies.wait(), timeout=1.0)
+    discovery_release.set()
+    await asyncio.wait_for(started_security.wait(), timeout=1.0)
+    await asyncio.wait_for(started_quality.wait(), timeout=1.0)
+    deep_dive_release.set()
+
+    with pytest.raises(Exception):
+        await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "team" in topic.lower() and "complete" in topic.lower()
+            ]
+        )
+        == 4
+    )
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "phase" in topic.lower() and "valid" in topic.lower()
+            ]
+        )
+        == 2
+    )
+    assert (
+        len(
+            [
+                topic
+                for topic, _ in bus.published
+                if "phase" in topic.lower() and "fail" in topic.lower()
+            ]
+        )
+        == 1
+    )
+    failure_messages = [
+        message
+        for topic, message in bus.published
+        if "phase" in topic.lower() and "fail" in topic.lower()
+    ]
+    assert len(failure_messages) == 1
+    failure_payload = _normalize_mapping(failure_messages[0].payload)
+    assert _mapping_has_key_like(failure_payload, "rollback")
+
+    workflow_id = getattr(orchestrator.analysis_state, "workflow_id", None)
+    if workflow_id is None:
+        workflow_ids = getattr(snapshot_store, "_workflow_index", {})
+        workflow_id = next(iter(workflow_ids), None)
+    assert workflow_id is not None
+    history = await snapshot_store.history(workflow_id)
+    assert history
+    assert any(_contains_value(snapshot.state, "kept") for snapshot in history)
+    assert any(_contains_value(snapshot.state, "discovery") for snapshot in history)
+    assert _contains_value(orchestrator.analysis_state, "failed")
