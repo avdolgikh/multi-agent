@@ -128,7 +128,9 @@ Master spec: `specs/hybrid-analysis-spec.md`
 
 | # | Task ID | Spec | Status |
 |---|---------|------|--------|
-| 6 | `hybrid-foundation` | Models + Team + ProjectOrchestrator state machine (stub agents) | TODO |
+| 6a | `hybrid-foundation-team` | Team class + stub agents (single collaboration unit) | DONE |
+| 6b | `hybrid-foundation-pipeline` | ProjectOrchestrator + 3-phase happy path + validator + snapshots | IN PROGRESS — retry w/ `--max-revisions 6`; quota-blocked at iter 5 Stage 2b on 2026-04-20 (Codex usage limit; resets 21:24 local). Re-kick resumes from `.pipeline-state/hybrid-foundation-pipeline.json` (iter=5, TESTS_GENERATED). |
+| 6c | `hybrid-foundation-resilience` | Saga rollback + phase-failed event (failure path) | TODO |
 | 7 | `hybrid-structure-team` | Discovery: Structure Team — 3 agents, intra-team choreography | TODO |
 | 8 | `hybrid-dependencies-team` | Discovery: Dependencies Team — 2 agents, concurrent execution | TODO |
 | 9 | `hybrid-deepdive-synthesis` | Deep Dive + Synthesis — full hybrid pipeline end-to-end | TODO |
@@ -143,6 +145,10 @@ cd D:/dev/avdolgikh_github_repos/spec-driven-dev-pipeline
 # Primary: Codex provider (with full validation suite — ruff + format + pyright + pytest)
 uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
 
+# For broader-scope slices (hybrid/comparison): bump revision cap from default 4 to 6.
+# Reviewer is thorough; some specs need more revision rounds even when feedback is non-recurring.
+uv run python scripts/run_pipeline.py <task-id> --provider codex --max-revisions 6 --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
+
 # Secondary: Gemini provider
 uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
 ```
@@ -153,6 +159,25 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 - **Codex / Gemini**: Generate tests and implementation code via the pipeline.
 - **Ollama local models**: Runtime LLM provider for the multi-agent system's agents.
 
+### Live Demo Runners (per-milestone)
+
+After a milestone's slices land, Claude is pre-authorized to write a small ad-hoc driver script under `scripts/run_<milestone>_demo.py` that exercises the new code end-to-end with stubs (no LLM calls), wired to `init_observability(<service-name>)` for Phoenix tracing. Demo scripts are scratch — do not commit unless the user asks. CLI entry points (`__main__.py`) belong to the spec that owns them.
+
+**Hybrid demo (after slices 6a-6c land):** `scripts/run_hybrid_demo.py` — builds 5 stub teams (DISCOVERY x2, DEEP_DIVE x2, SYNTHESIS x1), constructs `ProjectOrchestrator`, runs the happy path, prints workflow id + COMPLETED state + snapshot count = 3. Expected Phoenix span tree: `ProjectOrchestrator.run` → 3 phase spans → team spans (DISCOVERY teams concurrent) → stub `.execute` spans. No LLM spans (stubs). Topology matters more than exact span names — those are implementation choices the spec does not pin.
+
+**Prereq for any demo:** Phoenix running (`uv run python scripts/run_phoenix.py`); see `project_live_run_nuances.md` (personal scratch) for known Windows orphan-port quirks on `:4317`.
+
+### Session Wrap-Up Protocol (Claude)
+
+**AGENTS.md is the canonical, version-controlled long-term memory. Personal memory (`~/.claude/.../memory/`) is local scratch only.** Anything load-bearing for future sessions, future agents, or other humans MUST land in AGENTS.md (or in repo files like specs / docs). Personal memory is appropriate only for ephemeral session state (Monitor task IDs, "we stopped here today", in-flight drafts before they're applied).
+
+When the session is wrapping up, Claude MUST prepare for immediate resume without prompting:
+1. Push durable lessons (pipeline behaviors, run commands, design decisions, demo runners) into AGENTS.md.
+2. Update the session-resume memory with ephemeral state only: pipeline subprocess status, next 2-5 granular steps, Monitor/TaskList handles.
+3. Persist in-conversation drafts (specs, prompt edits, AGENTS.md diffs) as separate memory files so they survive context compaction — but treat them as a staging area, not the destination.
+4. List queued edits blocked by hash_targets or other locks so the next session resolves them first.
+5. Do not ask permission; this is pre-authorized.
+
 ### Lessons Learned (load-bearing rules for future specs)
 
 - **Branch-before-merge spec work risks divergence.** Pipelines cut before a prior spec merges produce rebase conflicts on the same files. Sequence specs, or rebase onto master before Stage 4.
@@ -161,6 +186,11 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 - **Stage 1 NO_EFFECT recovery.** When a task's tests already exist in the repo (e.g. added manually or from a prior session), Stage 1 exits code 10. Recovery: compute current tests hash, seed `.pipeline-state/<task>.json` with `stage=TESTS_FROZEN` + that hash, then re-run — the pipeline resumes at Stage 3 (Implementation).
 - **Specs need a `## Source Files` section** listing the `.py` filenames in backticks. The pipeline extracts `test_<stem>` terms from those to match test files to tasks.
 - **Specs are high-level intent, NOT pseudo-code.** Target ~150 lines. Keep Goal/Scope/REQ prose/ACs/Package Layout. Do NOT pin exact class/method signatures, attribute names, span names, event topic strings, enum values, or per-test assertions. Leave room for the test-writer and implementer to design the internal shape. An over-specified spec (1) makes the human do the agents' work, (2) creates ambiguity vectors at every pinned string (e.g. `Phase.DISCOVERY` read as literal-string by one agent and as enum-reference by another), (3) masks pipeline issues that don't actually exist with a slim spec. Evidence: M1 shipped 4 specs with the minimal TEMPLATE.md; hybrid-foundation-v1 was 580 lines and burned 3 failed pipeline runs before being slimmed.
+- **Spec backticks must use real test-file names; pipeline matches by basename.** When a spec lists `tests/test_foo.py` in backticks under `## Source Files`, the pipeline derives matching terms from the basename (`test_foo`). The pipeline's `_build_task_test_terms` was patched 2026-04-20 to also accept `Path(name).stem` when a backticked `.py` already starts with `test_` — without that patch, Stage 1 false-fails with "No task-specific test files exist" even after Codex writes the file correctly.
+- **Reviewer cap calibration: distinguish oscillation from thorough discovery.** The default `max_revisions=4` is calibrated for narrow-scope slices (3-5 ACs). Broader slices (5+ REQs / 8+ ACs) often need `--max-revisions 6`. Diagnostic: if the reviewer keeps re-flagging the SAME items after revisions, that's oscillation → split the spec (`feedback_split_when_oscillating.md`). If each iteration surfaces FRESH substantive gaps without recurrence, the test surface is just larger than 4 rounds — bump the cap, do not split.
+- **Revision stages need cumulative blocking feedback.** The pipeline's Stage 2b and Stage 5b were patched 2026-04-20 to pass a "Previously raised in earlier iterations (ensure your revision still addresses these; do not weaken or drop assertions added to satisfy them)" section alongside the current iteration's blocking list. Without it, the test-writer/implementer addresses the latest flags but silently drops earlier tightening, causing reviewer to re-raise old issues — false oscillation. Both pipeline patches are uncommitted in `spec-driven-dev-pipeline/src/spec_driven_dev_pipeline/core.py` as of 2026-04-20.
+- **Test-writer tends to over-constrain public shape.** Observed across 6b iterations 3-5: tests pin exact attribute names (`analysis_state`), substring-match class names (`"phase"`/`"valid"` in a payload class name), require topic constants to be UPPERCASE strings, or filter span descendants by exact names (`"run"`, `"execute"`). The spec deliberately leaves these to the implementer — see Spec Philosophy bullet above. The reviewer catches this and flags "over-specifies REQ-N beyond spec". When writing specs, do NOT include example attribute/class/topic/span names even in prose; if a name is load-bearing it must be a REQ, otherwise omit it. When drafting reviewer/test-writer prompts, reinforce "tests assert structural/behavioral properties, not internal naming".
+- **Codex usage quota can kill a run mid-revision.** `FAIL: Codex provider execution failed for role test-writer (exit 1)` with stderr `You've hit your usage limit ... try again at <HH:MM>` is a quota, not a code, failure. The pipeline preserves state (`.pipeline-state/<task>.json` stays at the pre-call stage/iter), and a simple re-kick with the same command resumes from the same iteration once the quota window reopens. Do NOT delete state, bump max-revisions, or edit tests in response — it's a transient external failure. If this recurs, consider running during off-peak windows or switching providers for that slice.
 
 ---
 
@@ -171,7 +201,14 @@ uv run python scripts/run_pipeline.py <task-id> --provider gemini --repo-root D:
 cd D:/dev/avdolgikh_github_repos/spec-driven-dev-pipeline
 uv run python scripts/run_pipeline.py <task-id> --provider codex --repo-root D:/dev/avdolgikh_github_repos/multi-agent --config D:/dev/avdolgikh_github_repos/multi-agent/pipeline-config.toml
 
-# To start a spec fresh, delete state first:
-rm -rf D:/dev/avdolgikh_github_repos/multi-agent/.pipeline-state/<task-id>.json
+# To start a spec fresh, delete state + the test artifact (avoids Stage 1 conflict):
+rm -f D:/dev/avdolgikh_github_repos/multi-agent/.pipeline-state/<task-id>.json
+rm -f D:/dev/avdolgikh_github_repos/multi-agent/tests/test_<spec-stem>.py
+
+# After cap-exit, do NOT patch tests/state to fake an approval. Either:
+#  - re-kick with --max-revisions 6 (if reviewer is finding fresh gaps, not regressions)
+#  - split the spec into smaller slices (if reviewer is re-flagging the same items)
+#  - fix pipeline prompts/loop (if the failure mode is structural)
+# See `feedback_no_pipeline_shortcuts.md` and `feedback_split_when_oscillating.md`.
 ```
 

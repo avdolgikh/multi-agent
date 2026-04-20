@@ -132,7 +132,9 @@ acceptance criteria, and tests.
 
 | # | Task ID | Scope | Source location |
 |---|---------|-------|-----------------|
-| 1 | `hybrid-foundation` | Models + Team abstraction + ProjectOrchestrator state machine (stub agents) | `src/hybrid/project_analysis/` |
+| 1a | `hybrid-foundation-team` | Team class + stub agents (single collaboration unit) | `src/hybrid/project_analysis/` |
+| 1b | `hybrid-foundation-pipeline` | ProjectOrchestrator + 3-phase happy path + validator + snapshots | `src/hybrid/project_analysis/` |
+| 1c | `hybrid-foundation-resilience` | Saga rollback + phase-failed event (failure path) | `src/hybrid/project_analysis/` |
 | 2 | `hybrid-structure-team` | Discovery: Structure Team — 3 agents with intra-team choreography | `src/hybrid/project_analysis/` |
 | 3 | `hybrid-dependencies-team` | Discovery: Dependencies Team — 2 agents, concurrent with Structure Team | `src/hybrid/project_analysis/` |
 | 4 | `hybrid-deepdive-synthesis` | Deep Dive teams + Synthesis phase — full hybrid pipeline end-to-end | `src/hybrid/project_analysis/` |
@@ -144,7 +146,17 @@ acceptance criteria, and tests.
 
 ## Iteration Details
 
-### Iteration 1: `hybrid-foundation`
+### Iteration 1: `hybrid-foundation` (split into 1a/1b/1c)
+
+> **Split:** monolithic `hybrid-foundation` was too large for the pipeline
+> (oscillated on test review across ~5 attempts). Replaced by three vertical
+> slices, each a working system on its own:
+> - `hybrid-foundation-team` — Team + stub agents (see `hybrid-foundation-team-spec.md`)
+> - `hybrid-foundation-pipeline` — ProjectOrchestrator + 3-phase happy path (see `hybrid-foundation-pipeline-spec.md`)
+> - `hybrid-foundation-resilience` — Saga rollback + phase-failed event (see `hybrid-foundation-resilience-spec.md`)
+>
+> The original description below is retained for context on the full surface
+> delivered across all three slices.
 
 **Goal:** Build the skeleton — models, Team abstraction, ProjectOrchestrator
 state machine. Prove two-level coordination works with stub agents.
