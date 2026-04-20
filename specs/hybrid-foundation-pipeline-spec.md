@@ -1,7 +1,15 @@
 # Spec: Hybrid Foundation — Pipeline (happy path)
 
 ## Status
-Approved
+Superseded 2026-04-20 — split into
+`hybrid-foundation-phase-validator-spec.md` (validator surface) and
+`hybrid-foundation-orchestrator-spec.md` (state machine + events +
+observability). Split reason: test-writer consistently over-constrained
+public names across REQ-1/2/3/4 + AC-8 over 6 revision rounds (see
+AGENTS.md lesson "Test-writer tends to over-constrain public shape").
+Shrinking per-slice surface reduces the name-pinning pressure.
+
+Original content retained below for history.
 
 ## Goal
 Add the `ProjectOrchestrator` state machine on top of the `Team`
